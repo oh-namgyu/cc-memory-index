@@ -71,6 +71,7 @@ def test_config_accepts_bom(tmp_path: Path) -> None:
         "{not json",
         '{"lock_timeout_s": NaN}',
         '{"budget_bytes": 3000, "budget_bytes": 4000}',
+        pytest.param("[" * 60000, id="deeply-nested"),
     ],
 )
 def test_config_errors(tmp_path: Path, config: Union[str, dict]) -> None:

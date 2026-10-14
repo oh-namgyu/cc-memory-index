@@ -189,7 +189,7 @@ def load_config(sd: StoreDir) -> Config:
         obj = json.loads(data.decode("utf-8-sig"), object_pairs_hook=_reject_duplicates)
     except SafeIOError as e:
         raise ConfigError(f"cannot read {CONFIG_NAME}: {e}") from e
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:
         raise ConfigError(f"{CONFIG_NAME} is not valid JSON: {e}") from e
     if not isinstance(obj, dict):
         raise ConfigError(f"{CONFIG_NAME} must contain a JSON object")
