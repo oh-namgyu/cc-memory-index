@@ -43,16 +43,22 @@ class Folded:
             self.written.append(name)
 
 
-def _patch(sd: StoreDir, src: Source, entry: PendingEntry, out: Folded) -> bool:
-    """Add the entry's idx, section, sub and order to src's frontmatter; True when written."""
+def folded_text(src: Source, entry: PendingEntry) -> str:
+    """src's text with the entry's idx, section, sub and order added to its frontmatter (DESIGN §6.1
+    step 2). PatchError when that cannot be done safely or would not give the file this idx."""
     add: dict[str, Union[str, int]] = {
         "idx": entry.idx, "idx_section": entry.section, "idx_sub": entry.sub, "idx_order": entry.order,
     }
+    text = patch(src.text, add)
+    if norm(parse(text).get("idx") or "") != norm(entry.idx):
+        raise PatchError("it already has an 'idx' key that is empty or not a plain value")
+    return text
+
+
+def _patch(sd: StoreDir, src: Source, entry: PendingEntry, out: Folded) -> bool:
+    """Write folded_text into src; True when written."""
     try:
-        text = patch(src.text, add)
-        if norm(parse(text).get("idx") or "") != norm(entry.idx):
-            raise PatchError("an 'idx' key that is not a plain value is in the way")
-        sd.replace(src.name, text.encode("utf-8"), src.fp)
+        sd.replace(src.name, folded_text(src, entry).encode("utf-8"), src.fp)
     except ConcurrentEdit:
         out.concurrent.append(src.name)
         return False

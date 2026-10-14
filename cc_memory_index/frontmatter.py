@@ -93,7 +93,7 @@ def _window(text: str) -> str:
     return head[: len(raw[:WINDOW_BYTES].decode("utf-8", "ignore"))]
 
 
-def _locate(text: str) -> tuple[list[str], int]:
+def locate(text: str) -> tuple[list[str], int]:
     """Window lines and the index of the closing fence, or _ABSENT / _UNCLOSED."""
     window = _window(text)
     lines = window.split("\n")
@@ -185,7 +185,7 @@ def _classify(lines: list[str], close: int) -> _Layout:
 
 def parse(text: str) -> Frontmatter:
     """Parse the frontmatter at the start of text (DESIGN §3.1)."""
-    lines, close = _locate(text)
+    lines, close = locate(text)
     if close == _ABSENT:
         return Frontmatter({}, {}, False, True, None)
     if close == _UNCLOSED:
@@ -251,7 +251,7 @@ def patch(
     merged.update(repl)
     for key, value in merged.items():
         _format(key, value)
-    lines, close = _locate(text)
+    lines, close = locate(text)
     if close == _UNCLOSED:
         raise PatchError(_UNCLOSED_MSG)
     if not merged:

@@ -44,7 +44,7 @@ class BuildResult:
 
 
 @contextlib.contextmanager
-def _outcome(res: BuildResult) -> Iterator[None]:
+def outcome(res: BuildResult) -> Iterator[None]:
     """Turn every expected failure into its exit code and one message (DESIGN §10)."""
     try:
         yield
@@ -192,7 +192,7 @@ def _finish(plan: Plan, folded: Folded, res: BuildResult) -> None:
 def run_build(store_path: str, force: bool) -> BuildResult:
     """Render the store and write the generated files under the store lock."""
     res = BuildResult(EXIT_OK, stats={"rescued": [], "manual_added": [], "unrescuable": []})
-    with _outcome(res), StoreDir(store_path) as sd:
+    with outcome(res), StoreDir(store_path) as sd:
         with sd.lock(load_config(sd).lock_timeout_s):
             cfg = load_config(sd)
             plan = prepare(sd, cfg, EXIT_USAGE, res.stats, res.messages)
@@ -202,13 +202,18 @@ def run_build(store_path: str, force: bool) -> BuildResult:
     return res
 
 
+def out_of_sync(plan: Plan) -> list[str]:
+    """The generated files whose content (CRLF-normalised) differs from the fresh render."""
+    pairs = ((plan.l0, plan.rendered.l0), (plan.l1, plan.rendered.l1))
+    return [cur.name for cur, text in pairs if as_text(cur.data) != text]
+
+
 def run_check(store_path: str) -> BuildResult:
-    """Render without writing and compare with the files on disk (CRLF-normalised); no lock."""
+    """Render without writing and compare with the files on disk; no lock."""
     res = BuildResult(EXIT_OK)
-    with _outcome(res), StoreDir(store_path) as sd:
+    with outcome(res), StoreDir(store_path) as sd:
         plan = prepare(sd, load_config(sd), EXIT_OUT_OF_SYNC, res.stats, res.messages)
-        pairs = ((plan.l0, plan.rendered.l0), (plan.l1, plan.rendered.l1))
-        stale = [cur.name for cur, text in pairs if as_text(cur.data) != text]
+        stale = out_of_sync(plan)
         res.stats["out_of_sync"] = stale
         if stale:
             res.code = EXIT_OUT_OF_SYNC

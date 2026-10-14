@@ -21,7 +21,7 @@ from .generated import MIGRATING_MARK, RECORD_MAX_BYTES, Record, as_text, read_c
 from .items import MANUAL_NAME, PENDING_NAME
 from .plan import Refusal
 from .safeio import Fingerprint, StoreDir
-from .store import CONFIG_NAME, L0_NAME, RENDER_MARK, Config, _reject_duplicates, valid_source_name
+from .store import CONFIG_NAME, L0_NAME, RENDER_MARK, Config, reject_duplicates, valid_source_name
 
 SNAPSHOT_PREFIX = ".index-backup-"
 SNAPSHOT_ID = re.compile(r"\A[0-9]{8}T[0-9]{6}Z(?:-[0-9]{1,6})?\Z")
@@ -76,7 +76,7 @@ def _entry(name: object, value: object) -> Optional[Entry]:
 def parse_manifest(data: bytes, where: str) -> Manifest:
     """A manifest checked strictly; anything unexpected is a usage error (exit 2)."""
     try:
-        obj = json.loads(data.decode("utf-8"), object_pairs_hook=_reject_duplicates)
+        obj = json.loads(data.decode("utf-8"), object_pairs_hook=reject_duplicates)
     except (ValueError, RecursionError) as e:
         raise Refusal(EXIT_USAGE, f"{where} is not valid JSON: {e}") from e
     bad = Refusal(EXIT_USAGE, f"{where} is not a migration manifest")

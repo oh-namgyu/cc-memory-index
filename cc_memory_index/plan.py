@@ -55,22 +55,16 @@ class Plan:
     parse_failed: bool
 
 
-def _report_skips(scanned: ScanResult, notes: list[str]) -> bool:
-    """Report unreadable sources; True when any could not be parsed (exit 7).
+def skip_notes(scanned: ScanResult) -> list[str]:
+    """One note per memory file that was skipped or whose frontmatter cannot be parsed (exit 7).
 
     Badly named entries are not memory files and are left to lint (DESIGN §2). A source whose
     frontmatter cannot be parsed is still listed in L1 with its default line, so it stays reachable.
     """
-    failed = False
-    for name, reason in scanned.skipped:
-        if valid_source_name(name):
-            notes.append(f"skipped {name}: {reason}")
-            failed = True
-    for src in scanned.sources:
-        if not src.fm.ok:
-            notes.append(f"{src.name}: frontmatter not parsed ({src.fm.error}); listed in the L1 file as is")
-            failed = True
-    return failed
+    notes = [f"skipped {name}: {reason}" for name, reason in scanned.skipped if valid_source_name(name)]
+    notes += [f"{src.name}: frontmatter not parsed ({src.fm.error}); listed in the L1 file as is"
+              for src in scanned.sources if not src.fm.ok]
+    return notes
 
 
 def _uncovered(scanned: ScanResult, manual: Manual, items: Sequence[Item]) -> list[str]:
@@ -122,25 +116,33 @@ def _render(inputs: Inputs, cfg: Config, stats: dict[str, Any], notes: list[str]
     return items, rendered
 
 
-def prepare(sd: StoreDir, cfg: Config, refuse: int, stats: dict[str, Any], notes: list[str]) -> Plan:
-    """Read the store and render it. refuse is the exit code for a store that must be migrated
-    first; problems found on the way are appended to notes."""
+def refuse_if_migrating(sd: StoreDir, code: int) -> None:
     if sd.kind(MIGRATING_MARK) != "missing":
-        raise Refusal(refuse, f"{MIGRATING_MARK} exists: a migration was interrupted; run `migrate --apply` again")
+        raise Refusal(code, f"{MIGRATING_MARK} exists: a migration was interrupted; run `migrate --apply` again")
+
+
+def prepare(sd: StoreDir, cfg: Config, refuse: int, stats: dict[str, Any], notes: list[str]) -> Plan:
+    """Read the store and render it, writing nothing; the caller decides whether to hold the lock.
+
+    refuse is the exit code for a store that is mid-migration or must be migrated first; problems
+    found on the way are appended to notes."""
+    refuse_if_migrating(sd, refuse)
     l0, l1 = read_current(sd, L0_NAME), read_current(sd, cfg.l1_name)
     record = read_current(sd, RENDER_MARK, RECORD_MAX_BYTES)
     parsed = read_record(record)
     inputs = _read_inputs(sd, cfg, parsed, notes)
     if needs_migration(l0, record, inputs.scanned.sources, inputs.data.manual_fp is not None):
         raise Refusal(refuse, f"{L0_NAME} was written by hand: run `cc-memory-index migrate` first")
-    failed = _report_skips(inputs.scanned, notes)
+    skipped = skip_notes(inputs.scanned)
+    notes += skipped
     items, rendered = _render(inputs, cfg, stats, notes)
-    return Plan(inputs, items, rendered, l0, l1, record, parsed, failed)
+    return Plan(inputs, items, rendered, l0, l1, record, parsed, bool(skipped))
 
 
 def rerender(sd: StoreDir, cfg: Config, plan: Plan, stats: dict[str, Any], notes: list[str]) -> Plan:
     """Re-read sources and data files after the rescue wrote them and render again (DESIGN §6.1 step 4)."""
     inputs = _read_inputs(sd, cfg, plan.parsed, notes)
-    failed = _report_skips(inputs.scanned, notes)
+    skipped = skip_notes(inputs.scanned)
+    notes += skipped
     items, rendered = _render(inputs, cfg, stats, notes)
-    return dataclasses.replace(plan, inputs=inputs, items=items, rendered=rendered, parse_failed=failed)
+    return dataclasses.replace(plan, inputs=inputs, items=items, rendered=rendered, parse_failed=bool(skipped))

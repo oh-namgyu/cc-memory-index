@@ -12,7 +12,6 @@ import os
 import re
 from typing import Optional
 
-from .fsprim import kind_of
 from .safeio import SafeIOError, StoreDir, TooLarge
 
 MAX_TRANSCRIPTS = 50
@@ -34,16 +33,16 @@ def transcripts_dir(store_path: str) -> str:
 
 def newest(sd: StoreDir, n: int) -> list[tuple[str, int]]:
     """The n most recently modified regular *.jsonl entries as (name, size); links are never followed."""
-    found: list[tuple[float, str, int]] = []
+    found: list[tuple[int, str, int]] = []
     for name in sd.names():
         if not name.endswith(SUFFIX):
             continue
         try:
-            st = sd._lstat(name)
+            kind, size, mtime_ns = sd.entry_stat(name)
         except (OSError, SafeIOError):
             continue
-        if kind_of(st) == "file":
-            found.append((st.st_mtime, name, st.st_size))
+        if kind == "file":
+            found.append((mtime_ns, name, size))
     found.sort(key=lambda entry: (-entry[0], entry[1]))
     return [(name, size) for _, name, size in found[:n]]
 

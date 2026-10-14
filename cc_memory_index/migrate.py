@@ -15,7 +15,7 @@ import contextlib
 from typing import Any, Iterator, Optional
 
 from .build import (
-    EXIT_CONCURRENT, EXIT_INVARIANT, EXIT_OK, EXIT_OVERFLOW, EXIT_PARSE, EXIT_USAGE, BuildResult, _outcome, run_build,
+    EXIT_CONCURRENT, EXIT_INVARIANT, EXIT_OK, EXIT_OVERFLOW, EXIT_PARSE, EXIT_USAGE, BuildResult, outcome, run_build,
 )
 from .generated import MIGRATING_MARK, Current, as_text, read_current
 from .items import MANUAL_NAME, PENDING_NAME, load_manual, load_pending
@@ -30,7 +30,7 @@ from .store import CONFIG_NAME, L0_NAME, RENDER_MARK, Config, ScanResult, load_c
 EXIT_INCOMPLETE = 1
 RERUN = "run `cc-memory-index migrate --apply` again"
 ALREADY = "this store already uses the generated index: nothing to migrate"
-UNBUILT = "the memory files already carry index frontmatter, but the index was never built"
+UNBUILT = "this store is already migrated (index frontmatter or manual lines), but the index was never built"
 
 
 def _scan(sd: StoreDir, cfg: Config) -> ScanResult:
@@ -38,10 +38,16 @@ def _scan(sd: StoreDir, cfg: Config) -> ScanResult:
 
 
 def _format_state(sd: StoreDir, scanned: ScanResult) -> Optional[str]:
-    """'built', 'unbuilt' (a tier but no render record) or None for a hand-written store."""
+    """'built', 'unbuilt' or None for a hand-written store.
+
+    'unbuilt' means no render record but a tier or a manual-lines file: migrated already (an index
+    that links no memory file migrates into manual lines only) and never built. build makes the
+    same distinction (generated.needs_migration), so a rerun after the first build failed builds
+    instead of migrating the generated MEMORY.md again.
+    """
     if sd.kind(RENDER_MARK) != "missing":
         return "built"
-    if any(src.fm.get("tier") is not None for src in scanned.sources):
+    if sd.kind(MANUAL_NAME) != "missing" or any(src.fm.get("tier") is not None for src in scanned.sources):
         return "unbuilt"
     return None
 
@@ -193,7 +199,7 @@ def run_migrate(store_path: str, apply: bool = False, restore: Optional[str] = N
     if apply and restore is not None:
         return BuildResult(EXIT_USAGE, ["use --apply or --restore, not both"])
     then_build = False
-    with _outcome(res), StoreDir(store_path) as sd:
+    with outcome(res), StoreDir(store_path) as sd:
         cfg = load_config(sd)
         if restore is not None:
             with sd.lock(cfg.lock_timeout_s):

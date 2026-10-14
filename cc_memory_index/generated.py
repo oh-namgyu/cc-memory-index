@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
 from .safeio import Fingerprint, SafeIOError, StoreDir
-from .store import L0_NAME, Config, Source, _reject_duplicates, valid_source_name
+from .store import L0_NAME, Config, Source, reject_duplicates, valid_source_name
 
 MIGRATING_MARK = ".index-migrating"
 RECORD_VERSION = 1
@@ -108,7 +108,7 @@ def read_record(current: Current) -> Optional[Record]:
     if text is None:
         return None
     try:
-        obj = json.loads(text, object_pairs_hook=_reject_duplicates)
+        obj = json.loads(text, object_pairs_hook=reject_duplicates)
     except (ValueError, RecursionError):
         return None
     if not isinstance(obj, dict) or not {"version", "l0", "l1"} <= set(obj) <= _RECORD_KEYS:
@@ -194,24 +194,42 @@ def backup_generated(sd: StoreDir, name: str, data: bytes, now: Optional[float] 
     """Copy a generated file to .<name>.bak-<UTC timestamp> and keep its newest BACKUPS_KEPT backups.
 
     Within one second the suffix continues after the highest one present, and the backup just
-    written is never pruned, even when the clock has stepped back behind older backups.
+    written is never pruned, even when the clock has stepped back behind older backups. When the
+    newest backup already holds exactly data (a rerun after a failed write), it is kept instead of
+    a copy, so a rerun ends with the backups an uninterrupted run leaves (DESIGN §7.2).
     """
     prefix = backup_prefix(name)
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
-    keys = [_backup_key(prefix, n) for n in sd.names()]
-    same_second = [key[1] for key in keys if key is not None and key[0] == stamp]
-    backup = prefix + stamp + (f"-{max(same_second) + 1}" if same_second else "")
-    sd.replace(backup, data, None)
+    keyed = _backups(sd, prefix)
+    if keyed and _holds(sd, keyed[-1][1], data):
+        backup = keyed[-1][1]
+    else:
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
+        same_second = [key[1] for key, _ in keyed if key[0] == stamp]
+        backup = prefix + stamp + (f"-{max(same_second) + 1}" if same_second else "")
+        sd.replace(backup, data, None)
     _prune_backups(sd, prefix, backup)
     return backup
 
 
-def _prune_backups(sd: StoreDir, prefix: str, keep: str) -> None:
+def _backups(sd: StoreDir, prefix: str) -> list[tuple[tuple[str, int], str]]:
+    """(key, name) of every backup with this prefix, oldest first."""
     keyed: list[tuple[tuple[str, int], str]] = []
     for name in sd.names():
         key = _backup_key(prefix, name)
-        if key is not None and name != keep:
+        if key is not None:
             keyed.append((key, name))
-    for _, name in sorted(keyed)[: max(0, len(keyed) - (BACKUPS_KEPT - 1))]:
+    return sorted(keyed)
+
+
+def _holds(sd: StoreDir, name: str, data: bytes) -> bool:
+    """True when name is a regular, singly linked file whose content is exactly data."""
+    if sd.kind(name) != "file" or sd.nlink(name) != 1:
+        return False
+    return sd.fingerprint(name) == Fingerprint(len(data), hashlib.sha256(data).hexdigest())
+
+
+def _prune_backups(sd: StoreDir, prefix: str, keep: str) -> None:
+    keyed = [(key, name) for key, name in _backups(sd, prefix) if name != keep]
+    for _, name in keyed[: max(0, len(keyed) - (BACKUPS_KEPT - 1))]:
         if sd.kind(name) == "file" and sd.nlink(name) == 1:
             sd.remove(name, sd.fingerprint(name))

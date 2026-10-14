@@ -171,7 +171,7 @@ class Config:
             _check_field(f.name, getattr(self, f.name))
 
 
-def _reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     obj: dict[str, object] = {}
     for key, value in pairs:
         if key in obj:
@@ -186,7 +186,7 @@ def load_config(sd: StoreDir) -> Config:
         return Config()
     try:
         data, _ = sd.read(CONFIG_NAME, CONFIG_MAX_BYTES)
-        obj = json.loads(data.decode("utf-8-sig"), object_pairs_hook=_reject_duplicates)
+        obj = json.loads(data.decode("utf-8-sig"), object_pairs_hook=reject_duplicates)
     except SafeIOError as e:
         raise ConfigError(f"cannot read {CONFIG_NAME}: {e}") from e
     except (ValueError, RecursionError) as e:
@@ -213,7 +213,7 @@ class ScanResult:
     skipped: list[tuple[str, str]]
 
 
-def _skip_reason(sd: StoreDir, name: str, count: int) -> Optional[str]:
+def skip_reason(sd: StoreDir, name: str, count: int) -> Optional[str]:
     if not valid_source_name(name):
         return "invalid source name"
     found = sd.kind(name)
@@ -226,7 +226,7 @@ def _skip_reason(sd: StoreDir, name: str, count: int) -> Optional[str]:
     return None
 
 
-def _load(sd: StoreDir, name: str) -> tuple[Optional[Source], Optional[str]]:
+def load_source(sd: StoreDir, name: str) -> tuple[Optional[Source], Optional[str]]:
     try:
         data, fp = sd.read(name, SOURCE_MAX_BYTES)
     except TooLarge:
@@ -253,10 +253,10 @@ def scan(sd: StoreDir, cfg: Config, generated_names: set[str]) -> ScanResult:
     for name in sd.names():
         if not name.endswith(".md") or name.lower() in reserved:
             continue
-        reason = _skip_reason(sd, name, len(result.sources))
+        reason = skip_reason(sd, name, len(result.sources))
         source = None
         if reason is None:
-            source, reason = _load(sd, name)
+            source, reason = load_source(sd, name)
         if source is not None:
             result.sources.append(source)
         else:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import hashlib
 import os
 import secrets
 import stat
@@ -54,10 +53,6 @@ class _AnyType:
 
 ANY = _AnyType()
 Expect = Union[Fingerprint, None, _AnyType]
-
-
-def _fingerprint(data: bytes) -> Fingerprint:
-    return Fingerprint(len(data), hashlib.sha256(data).hexdigest())
 
 
 def _check_name(name: str) -> None:
@@ -169,9 +164,14 @@ class StoreDir:
     def nlink(self, name: str) -> int:
         return self._lstat(name).st_nlink
 
+    def entry_stat(self, name: str) -> tuple[str, int, int]:
+        """(kind, size, mtime_ns) of an entry from one lstat; links are never followed."""
+        st = self._lstat(name)
+        return kind_of(st), st.st_size, st.st_mtime_ns
+
     def read(self, name: str, max_bytes: int = 4 * 1024 * 1024) -> tuple[bytes, Fingerprint]:
         data = b"".join(self.iter_chunks(name, fsprim.CHUNK, max_bytes))
-        return data, _fingerprint(data)
+        return data, Fingerprint(*fsprim.digest([data]))
 
     def iter_chunks(self, name: str, chunk: int, max_bytes: int) -> Iterator[bytes]:
         """Stream an entry with read's refusals; TooLarge once more than max_bytes were read."""
@@ -235,7 +235,7 @@ class StoreDir:
             self._discard(tmp)
             raise
         self._sync_dir()
-        return _fingerprint(data)
+        return Fingerprint(*fsprim.digest([data]))
 
     def remove(self, name: str, expect: Expect) -> None:
         _check_expect(expect)

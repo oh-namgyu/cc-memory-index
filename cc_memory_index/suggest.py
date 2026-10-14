@@ -9,10 +9,10 @@ from __future__ import annotations
 import dataclasses
 from typing import Optional, Sequence
 
-from .build import EXIT_OK, EXIT_OUT_OF_SYNC, EXIT_OVERFLOW, EXIT_USAGE, BuildResult, _outcome, run_build
+from .build import EXIT_OK, EXIT_OUT_OF_SYNC, EXIT_OVERFLOW, EXIT_USAGE, BuildResult, outcome, run_build
 from .demote import INDEXED, demote_files
 from .items import Item
-from .lint import read_view
+from .plan import prepare
 from .render import Rendered, fill, head_lines, nbytes, render
 from .safeio import StoreDir
 from .store import L0_NAME, Config, load_config
@@ -113,6 +113,8 @@ def _propose(store_path: str, items: list[Item], preamble: Optional[str], cfg: C
 
 
 def _apply(store_path: str, chosen: Sequence[Candidate], res: BuildResult) -> None:
+    """Demote the chosen memories, then build. It builds when nothing is left to demote too, so a
+    rerun after the build failed finishes the job (DESIGN §7.2)."""
     demoted = demote_files(store_path, [c.file for c in chosen])
     res.messages += demoted.messages
     res.stats["demoted"] = demoted.stats["demoted"]
@@ -133,14 +135,14 @@ def run_suggest(store_path: str, transcripts: Optional[int] = None, apply: bool 
         res.messages.append(f"--transcripts must be between 1 and {MAX_TRANSCRIPTS}")
         return res
     chosen: list[Candidate] = []
-    with _outcome(res), StoreDir(store_path) as sd:
+    with outcome(res), StoreDir(store_path) as sd:
         cfg = load_config(sd)
-        view = read_view(sd, cfg, EXIT_USAGE if apply else EXIT_OUT_OF_SYNC, [])
-        chosen = _propose(store_path, view.items, view.manual.preamble, cfg, transcripts, res)
-    if not chosen or res.code != EXIT_OK:
+        plan = prepare(sd, cfg, EXIT_USAGE if apply else EXIT_OUT_OF_SYNC, {}, [])
+        chosen = _propose(store_path, plan.items, plan.inputs.data.manual.preamble, cfg, transcripts, res)
+    if res.code != EXIT_OK:
         return res
     if apply:
         _apply(store_path, chosen, res)
-    else:
+    elif chosen:
         res.messages.append("run `cc-memory-index suggest --apply` to demote them, or `demote FILE` one at a time")
     return res

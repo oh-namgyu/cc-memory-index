@@ -1,61 +1,30 @@
 """The lint command: report problems in a store without changing it (DESIGN §2, §6.2, §10).
 
-Errors exit 1; warnings alone exit 0. Nothing is written and the lock is not taken.
+Errors exit 1; warnings alone exit 0. The store is read and rendered by plan.prepare, as check
+does: nothing is written and the lock is not taken.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .build import EXIT_OK, EXIT_PARSE, BuildResult, Refusal, _outcome, run_check
-from .frontmatter import _locate
-from .generated import MIGRATING_MARK, RECORD_MAX_BYTES, Current, as_text, needs_migration, read_current
-from .items import (
-    MANUAL_NAME, PENDING_NAME, Item, Manual, PendingEntry, items_from_sources, load_manual, load_pending, manual_items,
-)
+from .build import EXIT_OK, BuildResult, out_of_sync, outcome
+from .fold import folded_text
+from .frontmatter import PatchError, locate
+from .generated import as_text
+from .items import MANUAL_NAME, PENDING_NAME, Item, PendingEntry
+from .plan import Plan, Refusal, prepare, skip_notes
 from .render import Rendered, nbytes, reachable
 from .safeio import StoreDir
-from .store import L0_NAME, RENDER_MARK, Config, ScanResult, Source, load_config, scan, valid_source_name
+from .store import L0_NAME, Config, ScanResult, Source, load_config, valid_source_name
+from .text import sanitize
 
 EXIT_ERRORS = 1
 _LINK = re.compile(r"\]\(\s*<?([^)\s>]+)>?")
 _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 _WIKI = re.compile(r"\[\[([^\[\]|#\n]+)(?:[|#][^\[\]\n]*)?\]\]")
-
-
-@dataclass
-class View:
-    """Everything a read-only command needs from a store, read once without the lock."""
-
-    scanned: ScanResult
-    manual: Manual
-    pending: list[PendingEntry]
-    items: list[Item]
-    l0: Current
-    l1: Current
-    record: Current
-
-
-def refuse_if_migrating(sd: StoreDir, code: int) -> None:
-    if sd.kind(MIGRATING_MARK) != "missing":
-        raise Refusal(code, f"{MIGRATING_MARK} exists: a migration was interrupted; run `migrate --apply` again")
-
-
-def read_view(sd: StoreDir, cfg: Config, refuse: int, notes: list[str]) -> View:
-    """Sources, data files, generated files and items; refuse is the exit code for a store that
-    is mid-migration or must be migrated first. Item problems are appended to notes."""
-    refuse_if_migrating(sd, refuse)
-    scanned = scan(sd, cfg, {L0_NAME, cfg.l1_name})
-    manual, pending = load_manual(sd), load_pending(sd)
-    l0, l1 = read_current(sd, L0_NAME), read_current(sd, cfg.l1_name)
-    record = read_current(sd, RENDER_MARK, RECORD_MAX_BYTES)
-    if needs_migration(l0, record, scanned.sources, sd.kind(MANUAL_NAME) != "missing"):
-        raise Refusal(refuse, f"{L0_NAME} was written by hand: run `cc-memory-index migrate` first")
-    items = items_from_sources(scanned.sources, pending, notes) + manual_items(manual)
-    return View(scanned, manual, pending, items, l0, l1, record)
 
 
 @dataclass
@@ -103,11 +72,11 @@ def _check_links(sd: StoreDir, texts: dict[str, Optional[str]], found: Findings)
     return linked
 
 
-def _check_reachable(view: View, texts: dict[str, Optional[str]], linked: set[str], found: Findings) -> None:
+def _check_reachable(plan: Plan, texts: dict[str, Optional[str]], linked: set[str], found: Findings) -> None:
     """A source is reachable when the generated files link to it or list its idx (DESIGN §4)."""
     l0, l1 = (texts[name] or "" for name in texts)
     on_disk = Rendered(l0, l1, [], [], [])
-    sources = [it for it in view.items if it.origin == "source"]
+    sources = [it for it in plan.items if it.origin == "source"]
     for name in reachable(sources, on_disk):
         if name not in linked:
             found.errors.append(
@@ -115,9 +84,22 @@ def _check_reachable(view: View, texts: dict[str, Optional[str]], linked: set[st
             )
 
 
-def _check_pending(view: View, cfg: Config, found: Findings) -> None:
-    readable = {src.name for src in view.scanned.sources}
-    for it in view.items:
+def _fold_hint(sd: StoreDir, src: Source, entry: PendingEntry) -> str:
+    """Why build has not moved the entry into src (DESIGN §6.1), or that it will."""
+    if sd.nlink(src.name) > 1:
+        return "build never writes a file with more than one hard link: add the line to its idx by hand"
+    try:
+        folded_text(src, entry)
+    except PatchError as e:
+        return f"build cannot add it there ({e}): fix the frontmatter, then run `cc-memory-index build`"
+    return "run `cc-memory-index build` to move it there"
+
+
+def _check_pending(sd: StoreDir, plan: Plan, cfg: Config, found: Findings) -> None:
+    """Every pending entry is an error: unresolved (DESIGN §6.2), or not folded into its file yet,
+    which a build does unless the fold keeps failing (§6.1)."""
+    readable = {src.name: src for src in plan.inputs.scanned.sources}
+    for it in plan.items:
         if it.origin != "pending":
             continue
         why = "its memory file has a different idx" if it.file in readable else "its memory file is missing"
@@ -125,6 +107,14 @@ def _check_pending(view: View, cfg: Config, found: Findings) -> None:
             f"{PENDING_NAME}: the line for {it.file} is unresolved ({why}); it is listed under Unresolved in"
             f" {cfg.l1_name}: put the right line into the file's idx, then remove the entry"
         )
+    waiting: set[str] = set()
+    for entry in plan.inputs.data.pending:
+        src = readable.get(entry.file)
+        if src is None or entry.file in waiting or sanitize(src.fm.get("idx") or ""):
+            continue
+        waiting.add(entry.file)
+        found.errors.append(f"{PENDING_NAME}: the line for {entry.file} is not in its frontmatter yet;"
+                            f" {_fold_hint(sd, src, entry)}")
 
 
 def _fold(name: str) -> str:
@@ -137,7 +127,7 @@ def _body(src: Source) -> Optional[str]:
         return src.text
     if not src.fm.ok:
         return None
-    lines, close = _locate(src.text)
+    lines, close = locate(src.text)
     return src.text[len("\n".join(lines[: close + 1])):]
 
 
@@ -186,40 +176,20 @@ def _check_oversized(items: list[Item], cfg: Config, found: Findings) -> None:
             )
 
 
-def _check_previous_l1(sd: StoreDir, cfg: Config, record: Current, found: Findings) -> None:
-    """The render record may name the L1 file written before l1_name was changed."""
-    try:
-        obj = json.loads(as_text(record.data) or "null")
-    except (ValueError, RecursionError):
-        return
-    previous = obj.get("l1_name") if isinstance(obj, dict) else None
-    if not isinstance(previous, str) or not valid_source_name(previous):
-        return
-    if previous.lower() != cfg.l1_name.lower() and sd.kind(previous) != "missing":
-        found.warnings.append(
-            f"{previous} is the previous L1 file (l1_name is now {cfg.l1_name}): delete it once nothing links to it"
-        )
-
-
-def _check_sync(store_path: str, found: Findings) -> None:
-    checked = run_check(store_path)
-    stale = checked.stats.get("out_of_sync")
-    if stale:
-        found.errors += [f"{name} is out of date: run `cc-memory-index build`" for name in stale]
-    elif stale is None and checked.code not in (EXIT_OK, EXIT_PARSE) and checked.messages:
-        found.errors.append(f"check failed (exit {checked.code}): {checked.messages[-1]}")
-
-
-def _lint_view(sd: StoreDir, cfg: Config, view: View, notes: list[str], found: Findings) -> None:
-    _check_scan(view.scanned, found)
-    texts = {L0_NAME: as_text(view.l0.data), cfg.l1_name: as_text(view.l1.data)}
+def _lint_plan(sd: StoreDir, cfg: Config, plan: Plan, notes: list[str], found: Findings) -> None:
+    """Every check, then prepare's notes as warnings: stale earlier L1 files, as build reports them,
+    and item problems. Skipped sources and unreadable pending files are already errors above."""
+    scanned = plan.inputs.scanned
+    _check_scan(scanned, found)
+    texts = {L0_NAME: as_text(plan.l0.data), cfg.l1_name: as_text(plan.l1.data)}
     linked = _check_links(sd, texts, found)
-    _check_reachable(view, texts, linked, found)
-    _check_pending(view, cfg, found)
-    _check_wiki(view.scanned, found)
-    _check_oversized(view.items, cfg, found)
-    _check_previous_l1(sd, cfg, view.record, found)
-    found.warnings += [note for note in notes if not note.startswith(PENDING_NAME)]
+    _check_reachable(plan, texts, linked, found)
+    _check_pending(sd, plan, cfg, found)
+    _check_wiki(scanned, found)
+    _check_oversized(plan.items, cfg, found)
+    found.errors += [f"{name} is out of date: run `cc-memory-index build`" for name in out_of_sync(plan)]
+    reported = set(skip_notes(scanned))
+    found.warnings += [note for note in notes if note not in reported and not note.startswith(PENDING_NAME)]
 
 
 def run_lint(store_path: str) -> BuildResult:
@@ -227,16 +197,15 @@ def run_lint(store_path: str) -> BuildResult:
     res = BuildResult(EXIT_OK)
     found = Findings()
     notes: list[str] = []
-    with _outcome(res), StoreDir(store_path) as sd:
+    with outcome(res), StoreDir(store_path) as sd:
         cfg = load_config(sd)
         try:
-            view = read_view(sd, cfg, EXIT_ERRORS, notes)
+            plan = prepare(sd, cfg, EXIT_ERRORS, {}, notes)
         except Refusal as e:
             found.errors.append(str(e))
         else:
-            res.stats.update(memory_files=len(view.scanned.sources), skipped=len(view.scanned.skipped))
-            _lint_view(sd, cfg, view, notes, found)
-            _check_sync(store_path, found)
+            res.stats.update(memory_files=len(plan.inputs.scanned.sources), skipped=len(plan.inputs.scanned.skipped))
+            _lint_plan(sd, cfg, plan, notes, found)
     res.messages += [f"error: {m}" for m in found.errors] + [f"warning: {m}" for m in found.warnings]
     res.stats.update(errors=len(found.errors), warnings=len(found.warnings))
     if res.code == EXIT_OK and found.errors:

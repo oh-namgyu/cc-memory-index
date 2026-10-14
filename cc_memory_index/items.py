@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 from .safeio import Fingerprint, SafeIOError, StoreDir
-from .store import Source, _reject_duplicates, valid_source_name
+from .store import Source, reject_duplicates, valid_source_name
 from .text import normalize_ws, sanitize
 
 MANUAL_NAME = ".index-manual.json"
@@ -80,7 +80,7 @@ def _read_object(sd: StoreDir, name: str) -> tuple[Optional[dict[str, object]], 
         return None, None
     try:
         data, fp = sd.read(name, DATA_MAX_BYTES)
-        obj = json.loads(data.decode("utf-8-sig"), object_pairs_hook=_reject_duplicates)
+        obj = json.loads(data.decode("utf-8-sig"), object_pairs_hook=reject_duplicates)
     except SafeIOError as e:
         raise DataFileError(f"cannot read {name}: {e}") from e
     except (ValueError, RecursionError) as e:

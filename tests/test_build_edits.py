@@ -74,7 +74,7 @@ def test_backup_names_never_collide(tmp_path: Path) -> None:
 def test_backup_survives_a_clock_that_stepped_back(tmp_path: Path) -> None:
     root = built_store(tmp_path)
     with StoreDir(str(root)) as sd:
-        newer = [backup_generated(sd, L1, b"new", now=2e9 + n) for n in range(5)]
+        newer = [backup_generated(sd, L1, f"new {n}".encode(), now=2e9 + n) for n in range(5)]
         older = backup_generated(sd, L1, b"after the clock stepped back", now=1e9)
     assert _backups(root, L1) == sorted([older] + newer[1:])
 

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Callable
 
 import pytest
-from storekit import make_store, memory_text, snapshot, write_json, write_memory
+from storekit import append, make_store, memory_text, snapshot, write_json, write_memory
 
 from cc_memory_index import store as store_mod
 from cc_memory_index.build import run_build
@@ -30,6 +31,10 @@ def _lint(root: Path) -> tuple[int, list[str], list[str]]:
     assert len(errors) + len(warnings) == len(res.messages)
     assert (res.stats["errors"], res.stats["warnings"]) == (len(errors), len(warnings))
     return res.code, errors, warnings
+
+
+def _pending(root: Path) -> list[str]:
+    return [e["file"] for e in json.loads((root / PENDING_NAME).read_text())["entries"]]
 
 
 def _built(root: Path) -> Path:
@@ -141,14 +146,17 @@ def test_warnings_for_names_oversized_idx_bad_names_and_no_frontmatter(tmp_path:
     assert "plain.md has no frontmatter: it is indexed by its file name only" in warnings
 
 
-def test_stale_previous_l1_file_is_a_warning(tmp_path: Path) -> None:
+def test_stale_earlier_l1_file_is_reported_as_build_reports_it(tmp_path: Path) -> None:
+    """An L1 file written before l1_name changed, unchanged since, is no memory file to build or lint."""
     root = _built(clean_store(tmp_path))
-    record = json.loads((root / MARK).read_text())
-    record["l1_name"] = "old-l1.md"
-    (root / MARK).write_text(json.dumps(record))
-    (root / "old-l1.md").write_text(memory_text(name="old-l1"))
-    _, _, warnings = _lint(root)
-    assert f"old-l1.md is the previous L1 file (l1_name is now {L1}): delete it once nothing links to it" in warnings
+    write_json(root, ".memory-index.json", {"l1_name": "more.md"})
+    stale = f"stale generated file {L1}: delete it (the L1 file is now more.md)"
+    assert stale in run_build(str(root), False).messages
+    assert _lint(root)[:2] == (0, []) and stale in _lint(root)[2]
+    append(root, L1, "- a line kept in the old file\n")
+    assert not any("stale" in m for m in run_build(str(root), False).messages)
+    code, errors, warnings = _lint(root)
+    assert (code, errors) == (0, []) and not any("stale" in w for w in warnings)
 
 
 def test_record_naming_the_current_l1_is_fine(tmp_path: Path) -> None:
@@ -156,7 +164,45 @@ def test_record_naming_the_current_l1_is_fine(tmp_path: Path) -> None:
     record = json.loads((root / MARK).read_text())
     record["l1_name"] = L1
     (root / MARK).write_text(json.dumps(record))
-    assert not any("previous L1" in w for w in _lint(root)[2])
+    assert not any("stale" in w for w in _lint(root)[2])
+
+
+@pytest.mark.parametrize("frontmatter, why", [
+    ("metadata: [a, b]\n", "build cannot add it there ('metadata' is not a block mapping)"),
+    ('metadata:\n  idx: ""\n', "build cannot add it there (it already has an 'idx' key that is empty or not a"),
+])
+def test_pending_line_that_cannot_be_folded_is_an_error(tmp_path: Path, frontmatter: str, why: str) -> None:
+    root = _built(clean_store(tmp_path))
+    (root / "odd.md").write_text("---\nname: odd\n" + frontmatter + "---\nbody\n")
+    append(root, L0, "- [odd](odd.md) — rescued but never folded\n")
+    assert run_build(str(root), False).code == 0 and _pending(root) == ["odd.md"]
+    code, errors, _ = _lint(root)
+    assert code == 1 and len(errors) == 1, errors
+    assert errors[0].startswith(f"{PENDING_NAME}: the line for odd.md is not in its frontmatter yet; {why}")
+    assert run_build(str(root), False).stats["written"] == [] and _lint(root)[1] == errors
+
+
+def test_pending_line_for_a_hard_linked_file_says_build_will_not_write_it(tmp_path: Path) -> None:
+    root = _built(clean_store(tmp_path))
+    os.link(root / "tea.md", tmp_path / "elsewhere.md")
+    entry = {"file": "tea.md", "idx": "[Tea time](tea.md) — rescued", "section": "", "sub": "", "order": 9}
+    write_json(root, PENDING_NAME, {"version": 1, "entries": [entry]})
+    assert run_build(str(root), False).code == 0 and _pending(root) == ["tea.md"]
+    code, errors, _ = _lint(root)
+    assert code == 1 and errors == [f"{PENDING_NAME}: the line for tea.md is not in its frontmatter yet; build never"
+                                    " writes a file with more than one hard link: add the line to its idx by hand"]
+
+
+def test_pending_line_left_by_an_interrupted_build_is_an_error_until_built(tmp_path: Path) -> None:
+    root = _built(clean_store(tmp_path))
+    entry = {"file": "tea.md", "idx": "[Tea time](tea.md) — rescued", "section": "", "sub": "", "order": 9}
+    write_json(root, PENDING_NAME, {"version": 1, "entries": [entry, dict(entry, idx="a second line")]})
+    code, errors, _ = _lint(root)
+    assert code == 1 and errors[0].startswith(f"{PENDING_NAME}: the line for tea.md is unresolved")
+    assert errors[1] == (f"{PENDING_NAME}: the line for tea.md is not in its frontmatter yet; run"
+                         " `cc-memory-index build` to move it there")
+    _built(root)
+    assert _pending(root) == ["tea.md"] and [e[:60] for e in _lint(root)[1]] == [errors[0][:60]]
 
 
 def test_interrupted_migration_and_unmigrated_store_are_errors(tmp_path: Path) -> None:

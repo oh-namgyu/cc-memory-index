@@ -54,8 +54,9 @@ def describe(result: BuildResult) -> Optional[str]:
         lines.append(
             "MEMORY.md is generated from each memory file's frontmatter. The line you added for "
             + ", ".join(rescued)
-            + " was moved into that file's metadata.idx and is listed in the on-demand index."
-            " Set metadata.tier: resident in a memory file to load it every session."
+            + " was saved as that file's metadata.idx and is listed in the on-demand index, which is"
+            " the right place for most memories. Set metadata.tier: resident only if this memory must"
+            " be known at the start of every session; MEMORY.md has a size budget."
         )
     manual = stats.get("manual_added")
     if isinstance(manual, list) and manual:
