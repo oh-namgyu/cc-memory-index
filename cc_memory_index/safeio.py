@@ -5,54 +5,23 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import re
 import secrets
 import stat
-from dataclasses import dataclass
-from typing import Iterator, Optional, Union
+import time
+from typing import Iterator, Optional
 
 from . import fsprim
 from .fsprim import BINARY, NOFOLLOW, NONBLOCK, kind_of
+from .safetypes import (
+    ANY, ConcurrentEdit, Expect, Fingerprint, LockTimeout, RootChanged, SafeIOError, TooLarge, UnsafeEntry,
+)
 
+__all__ = ["ANY", "LOCK_NAME", "TEMP_MIN_AGE_NS", "TEMP_NAME", "ConcurrentEdit", "Expect", "Fingerprint", "LockTimeout",
+           "RootChanged", "SafeIOError", "StoreDir", "TooLarge", "UnsafeEntry"]
 LOCK_NAME = ".index.lock"
-
-
-class SafeIOError(Exception):
-    """Base class of every refusal raised by this module."""
-
-
-class UnsafeEntry(SafeIOError):
-    """The entry is a link, a reparse point, not a regular file, hard-linked, or a bad name."""
-
-
-class ConcurrentEdit(SafeIOError):
-    """The entry changed after it was fingerprinted."""
-
-
-class LockTimeout(SafeIOError):
-    """Another instance holds the store lock."""
-
-
-class TooLarge(SafeIOError):
-    """The entry is larger than the caller's limit."""
-
-
-class RootChanged(SafeIOError):
-    """The store root path no longer refers to the directory that was opened."""
-
-
-@dataclass(frozen=True)
-class Fingerprint:
-    size: int
-    sha256: str
-
-
-class _AnyType:
-    def __repr__(self) -> str:
-        return "ANY"
-
-
-ANY = _AnyType()
-Expect = Union[Fingerprint, None, _AnyType]
+TEMP_NAME = re.compile(r"\.(.+)\.tmp-[0-9a-f]{16}\Z")
+TEMP_MIN_AGE_NS = 10 * 60 * 10**9
 
 
 def _check_name(name: str) -> None:
@@ -244,6 +213,21 @@ class StoreDir:
         target, kw = self._at(name)
         os.unlink(target, **kw)
         self._sync_dir()
+
+    def sweep_temp(self) -> int:
+        """Remove the temporary files that writes killed before their rename left behind (DESIGN §7.1):
+        regular files named like TEMP_NAME, last modified more than TEMP_MIN_AGE_NS ago. Links and
+        directories are skipped and remove() refuses hard-linked files; a removal that fails is left
+        for the next run. Returns how many were removed."""
+        removed = 0
+        now = time.time_ns()
+        for name in filter(TEMP_NAME.match, self.names()):
+            with contextlib.suppress(OSError, SafeIOError):
+                kind, _, mtime_ns = self.entry_stat(name)
+                if kind == "file" and now - mtime_ns > TEMP_MIN_AGE_NS:
+                    self.remove(name, ANY)
+                    removed += 1
+        return removed
 
     def _discard(self, name: str) -> None:
         with contextlib.suppress(OSError, SafeIOError, ValueError):

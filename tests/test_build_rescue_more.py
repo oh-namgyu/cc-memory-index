@@ -45,7 +45,7 @@ def test_unpatchable_target_stays_pending_and_listed(tmp_path: Path) -> None:
     assert res.code == 0 and res.stats["rescued"] == [{"file": "odd.md", "idx": entry["idx"]}]
     assert (root / "odd.md").read_bytes() == original and _pending(root) == [entry]
     assert any("'metadata' is not a block mapping" in m and PENDING_NAME in m for m in res.messages)
-    assert "## Other\n\n- [Odd](odd.md) — kept anyway\n" in (root / L1).read_text()
+    assert "## Other\n- [Odd](odd.md) — kept anyway\n" in (root / L1).read_text()
     assert run_check(str(root)).code == 0
     again = run_build(str(root), False)
     assert again.code == 0 and again.stats["written"] == [] and _pending(root) == [entry]
@@ -103,7 +103,7 @@ def test_line_added_to_an_l0_without_sections(tmp_path: Path) -> None:
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["rescued"][0]["file"] == "new_note.md"
     assert parse((root / "new_note.md").read_text()).get("idx_section") == ""
-    assert "## Project\n\n- [A](a.md)\n" + line + "\n" in (root / L1).read_text()
+    assert "## Project\n- [A](a.md)\n" + line + "\n" in (root / L1).read_text()
     _settled(root)
 
 
@@ -160,10 +160,10 @@ def test_sections_named_like_l1_headings_never_collide(tmp_path: Path) -> None:
         {"file": "c.md", "idx": "[c](c.md) — a conflicting line", "section": "", "sub": "", "order": 0}]})
     assert run_build(str(root), False).code == 0
     l1 = (root / L1).read_text()
-    assert "\n## Overflow (section)\n\n- [ov](ov.md)" in l1 and "\n## unresolved (section) (section)\n" in l1
+    assert "\n## Overflow (section)\n- [ov](ov.md)" in l1 and "\n## unresolved (section) (section)\n" in l1
     assert l1.count("\n## Unresolved\n") == 1 and "\n## Overflow\n" not in l1
-    l1 = l1.replace("## Overflow (section)\n\n", "## Overflow (section)\n\n- under the user section\n")
-    l1 = l1.replace("## unresolved (section) (section)\n\n", "## unresolved (section) (section)\n\n- deeper\n")
+    l1 = l1.replace("## Overflow (section)\n", "## Overflow (section)\n- under the user section\n")
+    l1 = l1.replace("## unresolved (section) (section)\n", "## unresolved (section) (section)\n- deeper\n")
     (root / L1).write_text(l1 + "- under the real Unresolved heading\n")
     res = run_build(str(root), False)
     assert res.code == 0
@@ -171,7 +171,7 @@ def test_sections_named_like_l1_headings_never_collide(tmp_path: Path) -> None:
     assert lines == [("under the user section", "Overflow"), ("deeper", "unresolved (section)"),
                      ("under the real Unresolved heading", "Other")]
     l0 = (root / L0).read_text()
-    assert "## Overflow\n\n- under the user section\n" in l0 and "## Other\n\n- under the real" in l0
+    assert "## Overflow\n- under the user section\n" in l0 and "## Other\n- under the real" in l0
     _settled(root)
 
 

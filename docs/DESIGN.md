@@ -36,6 +36,8 @@ set `CC_MEMORY_INDEX_DIR`.
 | `.index-render.json` | SHA-256 of L0 and L1 as last written by this tool |
 | `.index.lock` | Lock target (§7.4) |
 | `.index-migrating`, `.index-backup-<ts>/` | Migration only (§8) |
+| `.<name>.tmp-<16 hex>` | Temporary file of a write in progress; one left by a killed process is removed by the next writing command once it is 10 minutes old (§7.1) |
+| `index-notes.md` | Created by `migrate` for text that was not an index line (§8); an ordinary memory file afterwards |
 
 Source names must match `^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$` and must not contain `..`.
 Other names are skipped and reported by `lint`. At most 5,000 sources are read; a source over
@@ -95,10 +97,9 @@ Every source becomes an *item* `{file, idx, section, sub, order, tier}`. Items f
 * Sections are ordered by the smallest `order` they contain (then by name), subsections the
   same way, items by `(order, file)`. Within a section, items without a subsection come first,
   so they never appear under another subsection's heading.
-* L0 packs the items of one subsection into lines joined by ` · `, up to 230 bytes per line;
-  an item longer than that sits alone on its line, and so does an item whose text contains a
-  top-level ` · ` or an unbalanced bracket, so that splitting a line back into items (§6)
-  always gives the original items.
+* Every item has its own `- ` line in L0 and L1: Claude Code's guidance for `MEMORY.md` is one
+  line per entry, and a real session flagged packed lines as wrong. A `## ` or `### ` heading is
+  followed directly by its lines; exactly one blank line precedes each heading.
 * L0 always starts with the preamble, then a link line to L1, then the budget warning line
   when anything overflowed (§4.1).
 * L1 lists one item per line: all non-resident items by section, then an `Overflow` section,
@@ -109,14 +110,19 @@ Every source becomes an *item* `{file, idx, section, sub, order, tier}`. Items f
 
 ### 4.1 Budget
 
-The L0 budget defaults to 18,432 bytes and 135 lines (configurable, never above 25,000 bytes or
-200 lines). It is measured on the exact text written, including the preamble, the L1 link line
+The L0 budget defaults to 20,480 bytes and 160 lines, about 80% of Claude Code's 25 KB /
+200-line limit, so its own "near the limit" reminders stay away (configurable, never above
+25,000 bytes or 200 lines). With one entry per line the line budget usually binds first: about
+150 resident entries fit. It is measured on the exact text written, including the preamble, the L1 link line
 and a **reserved** warning line, so adding the warning can never push L0 over budget.
 
 1. If the fixed cost (preamble + link line + reserved warning + one maximum-size item) exceeds
    the budget, the configuration is rejected before anything is written (exit 2).
-2. Resident items whose `idx` exceeds the per-item cap (default 300 bytes) go to L1 `Overflow`.
-   Nothing is ever truncated.
+2. Resident items whose `idx` exceeds the per-item cap go to L1 `Overflow`. Nothing is ever
+   truncated. The default cap is 1,024 bytes: across 451 real index lines p50 was 142 B, p99
+   489 B and the maximum 692 B (non-ASCII text is 3 bytes per character), and 8% exceeded an
+   earlier 300-byte cap. The cap exists so that one huge entry cannot push every later entry
+   out of L0.
 3. The remaining resident items, in render order, are admitted **while they fit**. The first
    item that does not fit, and every item after it, goes to L1 `Overflow` in order.
    (Claude Code measures `MEMORY.md` after Claude writes it and asks Claude to shorten a file
@@ -162,8 +168,11 @@ Claude Code's built-in memory instructions tell Claude to add a line to `MEMORY.
 writing a memory. A generator that overwrote those lines would lose them silently, so every
 write first compares the current L0 and L1 with the hashes in `.index-render.json`. A file that
 already equals the fresh render is not an edit (that is how an interrupted build converges). On a
-mismatch, each *segment* (a ` · `-separated piece of a list line, split outside brackets and
-parentheses) of the current file that is not in the new render is classified:
+mismatch, each line of the current file is first compared whole (whitespace-normalised) with the
+lines of the new render and every default line; a line that matches is generated, whatever ` · `
+it contains. Every other line is split, after whitespace normalisation, into *segments*
+(` · `-separated pieces, split outside brackets and parentheses), and each segment not in the new
+render is classified:
 
 | Segment | Action |
 |---|---|
@@ -177,8 +186,9 @@ or L1 (whitespace-normalised), or nothing is written.
 
 `build --force` skips this analysis after copying the current L0 and L1 to
 `.MEMORY.md.bak-<UTC timestamp>` and `.<l1 name>.bak-<UTC timestamp>` (a `-1`, `-2` … suffix
-when the second repeats; the newest five per file are kept, and the backup just written is
-never pruned).
+when the second repeats; the newest five per file are kept, the backup just written is never
+pruned, and a backup identical to the newest one is not written again, so rerunning an
+interrupted `--force` cannot push an older backup out).
 
 ### 6.1 Folding pending lines
 
@@ -194,7 +204,9 @@ equal the entry is dropped. A crash between any two steps therefore loses nothin
 ### 6.2 Conflicts
 
 A pending entry whose file has since gained a *different* `idx` is kept, rendered under L1
-`Unresolved`, and reported by `lint` as an error. Nothing is discarded automatically.
+`Unresolved`, and reported by `lint` as an error. So is a pending entry whose fold keeps failing
+(for example an existing empty `idx:`, or a `metadata:` that is not a mapping); `lint` says why.
+Nothing is discarded automatically.
 
 ## 7. Writing safely
 
@@ -204,7 +216,13 @@ Every write replaces exactly one file atomically: a temporary file is created ne
 target with `O_CREAT | O_EXCL` (and `O_NOFOLLOW` where available), written, flushed and
 `fsync`ed, then moved over the target with `os.replace`; on POSIX the directory is `fsync`ed
 too. Existing permission bits are kept; new files are created `0600`. The temporary file is
-removed on any error.
+removed on any error. A process killed between creating and renaming its temporary file leaves
+`.<name>.tmp-<16 hex>`: every writing command, once it holds the lock, removes entries that
+match exactly `^\.(.+)\.tmp-[0-9a-f]{16}$`, are regular files with one link and were modified
+more than 10 minutes ago (for `migrate --apply` also in its snapshot directory). Links,
+directories and hard-linked files are never touched, a failed removal waits for the next run, and
+the count is reported as `temp_removed`. The margin protects a write in flight where advisory
+locks are not honoured, as on some network and sync file systems.
 
 ### 7.2 No rollback
 
@@ -220,9 +238,16 @@ again; if it changed, that file is left alone and the command exits 4 ("edited c
 run again"). A rescued line that could not be folded stays in `.index-pending.json`, so it is
 still rendered.
 
-The remaining window is between that last check and the rename itself. Within one Claude Code
-session the hook runs after the tool call has finished and tool calls are sequential, so the
-hook does not race its own session.
+The remaining window is between that last check and the rename itself, measured at about 80 µs
+per `MEMORY.md` replace. Within one Claude Code session the hook runs after the tool call has
+finished and tool calls are sequential, so the hook does not race its own session; only another
+session writing the same store at that instant can. Claude Code 2.1.299 writes files by
+replacing them (Edit and Write both produce a new inode, measured), so the window cannot be
+closed without an atomic exchange, which the standard library does not offer portably. In a
+stress test with a writer appending every 2–8 ms, 3 of 787 lines were lost, every one inside
+such a window. The worst case is the loss of an index *line*: Claude writes the memory file
+before adding its line, the memory file itself is never written by this race, and it stays
+listed in L1.
 
 ### 7.4 Lock
 
@@ -248,19 +273,34 @@ store, against concurrent editors that are not malicious, and against crashes.
 
 `migrate` converts a hand-written `MEMORY.md`. It is a dry run unless `--apply` is given.
 
-* A segment linking to one source gives that source `tier: resident` and its `idx`,
-  `idx_section`, `idx_sub` and `idx_order` — the rendered L0 keeps every original line.
-* Unlinked segments, and second and later segments pointing at the same source, become manual
-  lines. Text before the first `## ` heading becomes the manual preamble.
+* Index lines are the top-level `- ` list lines and the `## `/`### ` headings after the
+  preamble. Every other line — paragraphs, indented list items, tables, block quotes, HTML, and
+  every line of a fenced code block (fences included) or of an HTML comment that starts a line —
+  is a *note*.
+* A segment of an index line linking to one source gives that source `tier: resident` and its
+  `idx`, `idx_section`, `idx_sub` and `idx_order`. Unlinked segments, and second and later
+  segments pointing at the same source, become manual lines. Text before the first `## ` heading
+  or top-level `- ` line becomes the manual preamble.
+* Notes are moved verbatim (each line byte for byte, LF endings) into one new memory file,
+  `index-notes.md` (`-2`, `-3`… when the name exists, is reserved or is linked from the index),
+  with frontmatter `name: <stem>`, `type: reference`, `tier: resident` and a fixed `idx`
+  (`idx_order: 0`), a title, then each original section that had notes under its heading as
+  written. No notes, no file; more than 1 MiB of notes is refused (exit 2). Notes are then no
+  longer loaded every session; only the notes file's index line is. The dry run prints how many
+  lines move and the file name.
 * Sources that were not in `MEMORY.md` get no tier, so they are listed in L1.
-* `--apply` first copies every regular source and data file into `.index-backup-<ts>/`, writes
-  `.index-migrating`, then patches sources one by one (keys that already exist are skipped, so
-  a rerun resumes), recording each file's before and after hash in the backup's
-  `manifest.json`. It then renders and checks that every original segment is present. Success
-  removes the marker; failure keeps it and exits 1.
+* `--apply` writes the marker, then the snapshot `.index-backup-<ts>/` and its `manifest.json`
+  (every intended after-hash is recorded before the corresponding write), then
+  `.index-manual.json`, the notes file and the sources one by one (keys that already exist are
+  skipped, so a rerun resumes into the same snapshot). It checks that every original segment is
+  in L0 ∪ L1 and every note is in the notes file in order, builds the index under the same lock
+  (notes count as moved, not as hand edits; a line added during an interrupted run is still
+  rescued), and removes the marker last. Any failure keeps the marker.
 * `migrate --restore <ts>` puts back a source only if its current hash equals the recorded
-  after-hash; a file edited since is left alone and reported (exit 4).
-* A store that already uses this format is left unchanged.
+  after-hash, and removes the notes file only if it still holds its after-hash; a file edited
+  since is left alone and reported (exit 4).
+* A store that already uses this format (a render record, a manual-lines file, or a source
+  with a `tier`) is left unchanged; if it was converted but never built, `--apply` builds it.
 * Conversely, `build` refuses (exit 2, "run migrate first") a store that has a non-empty
   `MEMORY.md` but no `.index-render.json` and no source with a `tier`: treating every line of
   a hand-written index as a hand edit would move all of it to L1.
@@ -271,10 +311,9 @@ store, against concurrent editors that are not malicious, and against crashes.
 
 | Key | Default | Range |
 |---|---|---|
-| `budget_bytes` | 18432 | 2048–25000 |
-| `budget_lines` | 135 | 20–200 |
-| `item_max_bytes` | 300 | 80–2000 |
-| `line_max_bytes` | 230 | 80–2000 |
+| `budget_bytes` | 20480 | 2048–25000 |
+| `budget_lines` | 160 | 20–200 |
+| `item_max_bytes` | 1024 | 80–4096 |
 | `l1_name` | `index-l1.md` | a valid source name |
 | `lock_timeout_s` | 5 | 1–60 |
 
@@ -289,9 +328,9 @@ human summary (`--json`: one JSON object); stderr carries errors and warnings on
 | `build [--force]` | yes | 0 · 1 overflow (L0 still within budget) · 3 unrescuable hand edit |
 | `check` | no | 0 in sync · 1 out of sync |
 | `lint` | no | 0 · 1 errors found |
-| `suggest [--transcripts N] [--apply]` | only with `--apply` | 0 · 1 |
+| `suggest [--transcripts N] [--apply]` | only with `--apply`, which always ends with a build | 0 · 1 |
 | `demote FILE` | yes | the following build's code · 2 unknown, invalid or generated name · 7 frontmatter that cannot be patched |
-| `migrate [--apply \| --restore TS]` | with `--apply` / `--restore` | 0 · 1 invariant failed |
+| `migrate [--apply \| --restore TS]` | with `--apply` / `--restore` | 0 · 1 invariant failed (marker kept) · the first build's 3/4/6/8 (marker kept) · 7 unparseable source |
 | `hook` | yes, only for an edit inside a store | always 0 |
 
 Common: 2 usage or configuration error · 4 edited concurrently, rerun · 5 lock timeout ·

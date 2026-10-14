@@ -17,7 +17,7 @@ from cc_memory_index.render import (
     render,
 )
 from cc_memory_index.rescue import Context, Edited, analyse, default_pieces, lost, memory_links
-from cc_memory_index.segments import Seg, body_segments, l1_heading, l1_section, pieces, split_head
+from cc_memory_index.segments import BodyLine, Seg, body_lines, l1_heading, l1_section, pieces, split_head
 from cc_memory_index.store import Config, Source
 
 L1 = "index-l1.md"
@@ -35,20 +35,28 @@ def test_l1_own_headings_have_no_section() -> None:
     assert l1_section("Overflow") is None and l1_section("UNRESOLVED") is None
 
 
-def test_body_segments() -> None:
+def _segments(lines: list[str], l1: bool) -> list[Seg]:
+    return [seg for line in body_lines(lines, l1) for seg in line.segments()]
+
+
+def test_body_lines_and_segments() -> None:
     lines = ["", "free line", "## A", "- a1 · [b](b.md) · c", "### Sub", "  - nested", "-", "#### deep",
-             "## Overflow", "- spilled", "## B", "- [x · y](x.md) · z"]
-    assert body_segments(lines, False) == [
+             "## Overflow", "- spilled", "## B", "- [x · y](x.md) · z", "plain · text"]
+    assert body_lines(lines, False)[:3] == [BodyLine("free line", "", "", False),
+                                            BodyLine("a1 · [b](b.md) · c", "A", "", True),
+                                            BodyLine("nested", "A", "Sub", True)]
+    assert _segments(lines, False) == [
         Seg("free line", "", ""), Seg("a1", "A", ""), Seg("[b](b.md)", "A", ""), Seg("c", "A", ""),
         Seg("nested", "A", "Sub"), Seg("#### deep", "A", "Sub"), Seg("spilled", "Overflow", ""),
-        Seg("[x · y](x.md)", "B", ""), Seg("z", "B", ""),
+        Seg("[x · y](x.md)", "B", ""), Seg("z", "B", ""), Seg("plain · text", "B", ""),
     ]
-    assert body_segments(["## Overflow", "### s", "- spilled", "## Overflow (section)", "- mine"], True) == [
+    assert _segments(["## Overflow", "### s", "- spilled", "## Overflow (section)", "- mine"], True) == [
         Seg("spilled", "", "s"), Seg("mine", "Overflow", "")]
 
 
 def test_pieces_sanitise_before_splitting() -> None:
     assert pieces("a \x07· b") == ["a", "b"] and pieces("  x\t y ") == ["x y"] and pieces("\x07") == []
+    assert pieces("a\u00a0·\u3000b") == pieces("a · b") == ["a", "b"]
 
 
 def test_split_head_drops_generated_lines_and_needs_the_head() -> None:

@@ -11,7 +11,7 @@ from typing import Iterable, Optional, Sequence
 from .items import DEFAULT_SECTION, Item, PendingEntry
 from .segments import OVERFLOW, UNRESOLVED, l1_heading, norm, pieces
 from .store import Config
-from .text import SEPARATOR, sanitize, split_segments
+from .text import sanitize
 
 TITLE = "# Memory Index"
 NOTE = (
@@ -90,51 +90,27 @@ def render_order(items: Iterable[Item]) -> list[Item]:
     return sorted(items, key=key)
 
 
-def packable(idx: str) -> bool:
-    """True when idx stays one segment next to others: no top-level ' · ', brackets closed."""
-    return split_segments(idx + SEPARATOR + "x") == [idx, "x"]
-
-
 class Body:
-    """The sectioned part of L0 or L1. size and len(lines) are kept exact as items are added."""
+    """The sectioned part of L0 or L1, one item per line. size is kept exact as items are added."""
 
-    def __init__(self, line_max: int) -> None:
+    def __init__(self) -> None:
         self.lines: list[str] = []
         self.size = 0
-        self._line_max = line_max
         self._section: Optional[str] = None
         self._sub: Optional[str] = None
-        self._open = 0
-        self._joinable = False
 
-    def plan(self, item: Item) -> tuple[list[str], str]:
-        """New lines to append for item, or ([], text) to join onto the open line."""
-        new_section = item.section != self._section
-        head: list[str] = ["", "## " + item.section] if new_section else []
-        if new_section or item.sub != self._sub:
-            head += ["", "### " + item.sub, ""] if item.sub else [""]
-        else:
-            join = SEPARATOR + item.idx
-            if self._joinable and packable(item.idx) and self._open + nbytes(join) <= self._line_max:
-                return [], join
-        return head + [BULLET + item.idx], ""
+    def plan(self, item: Item) -> list[str]:
+        """The lines to append for item: a blank line and the heading of each section or subsection
+        it opens, then its own line."""
+        head = ["", "## " + item.section] if item.section != self._section else []
+        if item.sub and (head or item.sub != self._sub):
+            head += ["", "### " + item.sub]
+        return head + [BULLET + item.idx]
 
-    @staticmethod
-    def cost(plan: tuple[list[str], str]) -> tuple[int, int]:
-        lines, join = plan
-        return size_of(lines) + nbytes(join), len(lines)
-
-    def apply(self, item: Item, plan: tuple[list[str], str]) -> None:
-        lines, join = plan
-        self.size += self.cost(plan)[0]
-        if join:
-            self.lines[-1] += join
-            self._open += nbytes(join)
-            return
+    def apply(self, item: Item, lines: Sequence[str]) -> None:
         self.lines.extend(lines)
+        self.size += size_of(lines)
         self._section, self._sub = item.section, item.sub
-        self._open = nbytes(lines[-1])
-        self._joinable = packable(item.idx)
 
     def add(self, item: Item) -> None:
         self.apply(item, self.plan(item))
@@ -162,7 +138,7 @@ def head_lines(preamble: Optional[str], l1_name: str) -> list[str]:
 
 def check_fixed_cost(head: list[str], reserve: str, cfg: Config) -> None:
     """DESIGN §4.1 step 1: head, reserved warning and one maximum-size item must fit."""
-    probe = ["", "## " + DEFAULT_SECTION, "", BULLET + "x" * cfg.item_max_bytes]
+    probe = ["", "## " + DEFAULT_SECTION, BULLET + "x" * cfg.item_max_bytes]
     lines = head + [reserve] + probe
     size = size_of(lines)
     if size > cfg.budget_bytes or len(lines) > cfg.budget_lines:
@@ -190,18 +166,17 @@ def fill(head: list[str], resident: Sequence[Item], cfg: Config) -> Fill:
     reserve = warning_line(len(resident), cfg.l1_name)
     check_fixed_cost(head, reserve, cfg)
     base_size, base_lines = size_of(head) + nbytes(reserve) + 1, len(head) + 1
-    result = Fill(Body(cfg.line_max_bytes), [], [])
+    result = Fill(Body(), [], [])
     body = result.body
     stopped = False
     for item in render_order(resident):
         if nbytes(item.idx) > cfg.item_max_bytes:
             result.oversized.append(item)
         elif not stopped:
-            plan = body.plan(item)
-            size, lines = Body.cost(plan)
-            fits = base_size + body.size + size <= cfg.budget_bytes
-            if fits and base_lines + len(body.lines) + lines <= cfg.budget_lines:
-                body.apply(item, plan)
+            lines = body.plan(item)
+            fits = base_size + body.size + size_of(lines) <= cfg.budget_bytes
+            if fits and base_lines + len(body.lines) + len(lines) <= cfg.budget_lines:
+                body.apply(item, lines)
                 continue
             stopped = True
         result.overflow.append(item)
@@ -232,13 +207,13 @@ def l1_head(l1_name: str) -> list[str]:
 
 def _l1(listed: Sequence[Item], overflow: Sequence[Item], unresolved: Sequence[Item], l1_name: str) -> str:
     lines = l1_head(l1_name)
-    body = Body(0)
+    body = Body()
     for item in render_order(listed):
         body.add(dataclasses.replace(item, section=l1_heading(item.section)))
     lines += body.lines
     for title, group in ((OVERFLOW, overflow), (UNRESOLVED, unresolved)):
         if group:
-            lines += ["", "## " + title, ""] + [BULLET + item.idx for item in group]
+            lines += ["", "## " + title] + [BULLET + item.idx for item in group]
     return _join(lines)
 
 

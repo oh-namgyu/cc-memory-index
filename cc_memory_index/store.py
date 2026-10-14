@@ -25,8 +25,7 @@ GITFILE_MAX_BYTES = 4096
 _RANGES = {
     "budget_bytes": (2048, 25000),
     "budget_lines": (20, 200),
-    "item_max_bytes": (80, 2000),
-    "line_max_bytes": (80, 2000),
+    "item_max_bytes": (80, 4096),
     "lock_timeout_s": (1, 60),
 }
 
@@ -159,10 +158,9 @@ def _check_field(key: str, value: object) -> None:
 
 @dataclass(frozen=True)
 class Config:
-    budget_bytes: int = 18432
-    budget_lines: int = 135
-    item_max_bytes: int = 300
-    line_max_bytes: int = 230
+    budget_bytes: int = 20480
+    budget_lines: int = 160
+    item_max_bytes: int = 1024
     l1_name: str = "index-l1.md"
     lock_timeout_s: float = 5
 

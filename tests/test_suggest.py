@@ -87,7 +87,7 @@ def test_transcripts_rank_rarely_mentioned_files_first(tmp_path: Path) -> None:
 
 def test_oversized_item_comes_first_even_when_often_mentioned(tmp_path: Path) -> None:
     root = fill_store(project_store(tmp_path, TIGHT))
-    write_memory(root, "huge.md", name="huge", tier="resident", idx="[huge](huge.md) — " + "h" * 400)
+    write_memory(root, "huge.md", name="huge", tier="resident", idx="[huge](huge.md) — " + "h" * 1100)
     _transcripts(root, {"huge.md": 3, "m00.md": 0})
     proposal = run_suggest(str(root), transcripts=3).stats["proposal"]
     assert proposal[0]["file"] == "huge.md" and proposal[0]["oversized"] and proposal[0]["mentions"] == 3

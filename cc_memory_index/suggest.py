@@ -9,7 +9,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Optional, Sequence
 
-from .build import EXIT_OK, EXIT_OUT_OF_SYNC, EXIT_OVERFLOW, EXIT_USAGE, BuildResult, outcome, run_build
+from .build import EXIT_OK, EXIT_OUT_OF_SYNC, EXIT_OVERFLOW, EXIT_USAGE, BuildResult, outcome, run_build, swept
 from .demote import INDEXED, demote_files
 from .items import Item
 from .plan import prepare
@@ -118,6 +118,7 @@ def _apply(store_path: str, chosen: Sequence[Candidate], res: BuildResult) -> No
     demoted = demote_files(store_path, [c.file for c in chosen])
     res.messages += demoted.messages
     res.stats["demoted"] = demoted.stats["demoted"]
+    res.stats["temp_removed"] = swept(demoted)
     if demoted.code != EXIT_OK:
         res.code = demoted.code
         return
@@ -125,6 +126,7 @@ def _apply(store_path: str, chosen: Sequence[Candidate], res: BuildResult) -> No
     res.code = built.code
     res.messages += built.messages
     res.stats["build"] = built.stats
+    res.stats["temp_removed"] = swept(demoted, built)
 
 
 def run_suggest(store_path: str, transcripts: Optional[int] = None, apply: bool = False) -> BuildResult:

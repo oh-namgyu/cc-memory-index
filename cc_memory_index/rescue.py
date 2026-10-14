@@ -13,7 +13,7 @@ from typing import Callable, Iterable, Mapping, Optional, Sequence
 
 from .items import DEFAULT_SECTION, MANUAL_NAME, ORDER_LIMIT, PENDING_NAME, ManualLine, PendingEntry, default_idx
 from .render import Rendered, RenderInvariant, is_warning_line, l1_head, link_line, preamble_lines
-from .segments import Seg, body_segments, norm, pieces, split_head
+from .segments import BodyLine, Seg, body_lines, norm, pieces, split_head
 from .store import Source, valid_source_name
 from .text import sanitize
 
@@ -35,7 +35,8 @@ class Edited:
 class Context:
     """What the classification needs from the store as read under the lock. defaults holds the
     pieces of every source's default line, which is generated even when a pending line or an
-    idx is what gets rendered."""
+    idx is what gets rendered, and during a migration the pieces of the lines it moved to its
+    notes file."""
 
     rendered: Rendered
     preamble: Optional[str]
@@ -97,19 +98,24 @@ def _split(text: str, l1: bool, preamble: Optional[str], l1_names: Sequence[str]
     return split_head(lines, *_l0_head(preamble, l1_names))
 
 
-def body_pieces(rendered: Rendered, preamble: Optional[str], l1_name: str) -> set[str]:
-    """Normalised segments of the bodies of rendered L0 and L1 (their heads excluded)."""
-    out: set[str] = set()
+def _rendered_lines(rendered: Rendered, preamble: Optional[str], l1_name: str) -> list[BodyLine]:
+    """The body lines of rendered L0 and L1 (their heads excluded)."""
+    out: list[BodyLine] = []
     for text, l1 in ((rendered.l0, False), (rendered.l1, True)):
         rest, _ = _split(text, l1, preamble, (l1_name,))
         if rest is None:
             raise RenderInvariant("a rendered file does not start with its head")
-        out.update(p for seg in body_segments(rest, l1) for p in pieces(seg.text))
+        out += body_lines(rest, l1)
     return out
 
 
-def _body(ed: Edited, ctx: Context, out: Rescue) -> Optional[list[Seg]]:
-    """The segments after the head, or None (recorded as unrescuable) when the head was edited."""
+def body_pieces(rendered: Rendered, preamble: Optional[str], l1_name: str) -> set[str]:
+    """Normalised segments of the bodies of rendered L0 and L1 (their heads excluded)."""
+    return {p for line in _rendered_lines(rendered, preamble, l1_name) for p in pieces(line.text)}
+
+
+def _body(ed: Edited, ctx: Context, out: Rescue) -> Optional[list[BodyLine]]:
+    """The lines after the head, or None (recorded as unrescuable) when the head was edited."""
     if ed.text is None:
         out.unrescuable.append(Unrescuable(ed.name, "", "not valid UTF-8; restore it or run `build --force`"))
         return None
@@ -120,7 +126,7 @@ def _body(ed: Edited, ctx: Context, out: Rescue) -> Optional[list[Seg]]:
                   else f"preamble edited — change it in {MANUAL_NAME}")
         out.unrescuable.append(Unrescuable(ed.name, differs, reason))
         return None
-    return body_segments(rest, l1)
+    return body_lines(rest, l1)
 
 
 def _refusal(links: Sequence[str], ctx: Context, claimed: set[str]) -> Optional[str]:
@@ -142,18 +148,31 @@ def _refusal(links: Sequence[str], ctx: Context, claimed: set[str]) -> Optional[
     return None
 
 
+def _generated(ctx: Context) -> tuple[set[str], set[str]]:
+    """The generated lines and their pieces: those of the fresh render's bodies and every
+    source's default line."""
+    rendered = _rendered_lines(ctx.rendered, ctx.preamble, ctx.l1_names[0])
+    lines = {norm(line.text) for line in rendered} | {norm(default_idx(src)) for src in ctx.sources.values()}
+    return lines, {p for line in rendered for p in pieces(line.text)} | ctx.defaults
+
+
 def _added(edited: Sequence[Edited], ctx: Context, out: Rescue) -> list[tuple[str, Seg]]:
     """Segments of the edited files that are neither in the fresh render nor a source's default
-    line, first occurrence of each."""
-    known = body_pieces(ctx.rendered, ctx.preamble, ctx.l1_names[0]) | ctx.defaults
+    line, first occurrence of each.
+
+    A generated line holds exactly one item, so a line equal to a generated line is generated as a
+    whole, whatever ' · ' its text contains. Any other line (added by hand, or generated lines
+    joined or edited by hand) is compared segment by segment with the pieces of the generated lines.
+    """
+    whole, known = _generated(ctx)
     added: list[tuple[str, Seg]] = []
     seen: set[str] = set()
     for ed in edited:
-        segs = _body(ed, ctx, out)
-        if segs is None:
+        lines = _body(ed, ctx, out)
+        if lines is None:
             continue
-        out.pieces[ed.role] = [p for seg in segs for p in pieces(seg.text)]
-        for seg in segs:
+        out.pieces[ed.role] = [p for line in lines for p in pieces(line.text)]
+        for seg in (seg for line in lines if norm(line.text) not in whole for seg in line.segments()):
             key = norm(seg.text)
             if key not in seen and not all(p in known for p in pieces(seg.text)):
                 seen.add(key)
@@ -211,6 +230,6 @@ def lost(
         if analysed is not None:
             missing += [p for p in analysed if p not in new and p not in generated]
         elif text is not None:
-            found = [p for seg in body_segments(text.split("\n"), False) for p in pieces(seg.text)]
+            found = [p for line in body_lines(text.split("\n"), False) for p in pieces(line.text)]
             missing += [p for p in found if p in fresh and p not in new and p not in generated]
     return missing

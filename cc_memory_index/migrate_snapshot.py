@@ -1,8 +1,9 @@
 """Migration snapshots (.index-backup-<id>/manifest.json) and migrate --restore (DESIGN §8).
 
 The manifest records, for every copied file, its SHA-256 before the migration and the one the
-migration means to write. The intended hash is recorded before the file is written, so a run
-that stops anywhere can still be restored: a file that holds its after-hash is put back, one
+migration means to write; the notes file the migration creates has no before-hash. The intended
+hash is recorded before the file is written, so a run that stops anywhere can still be restored:
+a file that holds its after-hash is put back (or removed, when the migration created it), one
 that holds its before-hash was never changed, and anything else was edited since and is left
 alone.
 """
@@ -42,7 +43,7 @@ def sha256(data: bytes) -> str:
 
 @dataclass
 class Entry:
-    before: str
+    before: Optional[str]
     after: Optional[str]
 
 
@@ -68,7 +69,7 @@ def _entry(name: object, value: object) -> Optional[Entry]:
     if not isinstance(value, dict) or set(value) != {"before", "after"}:
         return None
     before, after = value["before"], value["after"]
-    if not (isinstance(before, str) and _sha_or_none(before) and _sha_or_none(after)):
+    if not (_sha_or_none(before) and _sha_or_none(after)) or before is after is None:
         return None
     return Entry(before, after)
 
@@ -138,6 +139,15 @@ class Snapshot:
             self._put(name, current)
             entry = manifest.files[name] = Entry(sha256(current), None)
         entry.after = sha256(new)
+
+    def intend_new(self, manifest: Manifest, name: str, new: bytes) -> None:
+        """Record a file the migration creates: no before-hash, new as its after-hash."""
+        manifest.files[name] = Entry(None, sha256(new))
+
+    def created(self) -> Optional[str]:
+        """The file the recorded migration creates, or None (no manifest yet, or no such file)."""
+        files = {} if self.manifest is None else self.manifest.files
+        return next((name for name, entry in sorted(files.items()) if entry.before is None), None)
 
     def intend_manual(self, manifest: Manifest, current: Optional[bytes], new: bytes) -> None:
         entry = manifest.files.get(MANUAL_NAME)

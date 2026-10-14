@@ -42,3 +42,12 @@ jobs:
 
       - name: Test
         run: python -m pytest -q -rs -p no:cacheprovider tests/
+
+      - name: Install and smoke the entry point
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check .
+          cc-memory-index --version
+          store="$(mktemp -d)"
+          cc-memory-index --dir "$store" build
+          cc-memory-index --dir "$store" check

@@ -1,7 +1,9 @@
-"""Reading generated index text back as segments, shared by the renderer and the rescuer (DESIGN §6).
+"""Reading generated index text back as lines and segments, shared by the renderer and the rescuer
+(DESIGN §6).
 
-A segment is one ` · `-separated piece of a list line, split outside brackets and parentheses,
-or any other non-blank line of a file's body. Segments are compared whitespace-normalised.
+A generated list line holds exactly one item. Lines written by hand may hold several: a segment is
+one ` · `-separated piece of a list line, split outside brackets and parentheses, or any other
+non-blank line of a file's body. Lines and segments are compared whitespace-normalised.
 """
 
 from __future__ import annotations
@@ -32,8 +34,9 @@ def norm(s: str) -> str:
 
 
 def pieces(text: str) -> list[str]:
-    """The normalised segments that a rendered list line holding text splits into."""
-    return [normalize_ws(p) for p in split_segments(sanitize(text))]
+    """The normalised segments that a list line holding text splits into; text that is equal when
+    normalised splits into the same pieces."""
+    return split_segments(norm(text))
 
 
 def _reserved(name: str) -> bool:
@@ -57,15 +60,29 @@ def l1_section(heading: str) -> Optional[str]:
     return heading
 
 
-def body_segments(lines: Iterable[str], l1: bool) -> list[Seg]:
-    """Segments of the lines after a file's head.
+@dataclass(frozen=True)
+class BodyLine:
+    """A non-blank line of a file's body, stripped: for a list line (listed) the text after '- '."""
+
+    text: str
+    section: str
+    sub: str
+    listed: bool
+
+    def segments(self) -> list[Seg]:
+        """A list line split on ' · ' outside brackets and parentheses; any other line whole."""
+        texts = split_segments(self.text) if self.listed else [self.text]
+        return [Seg(text, self.section, self.sub) for text in texts]
+
+
+def body_lines(lines: Iterable[str], l1: bool) -> list[BodyLine]:
+    """The lines after a file's head, each with the section and subsection it appeared under.
 
     '## ' and '### ' headings set the section and subsection (in L1 through l1_section; lines
-    under its Overflow and Unresolved headings get no section). A '- ' list line is split on
-    ' · '; any other non-blank line is one segment.
+    under its Overflow and Unresolved headings get no section); they are not returned themselves.
     """
     section, sub = "", ""
-    out: list[Seg] = []
+    out: list[BodyLine] = []
     for line in lines:
         s = line.strip()
         if s.startswith("### "):
@@ -74,9 +91,9 @@ def body_segments(lines: Iterable[str], l1: bool) -> list[Seg]:
             name = sanitize(s[3:])
             section, sub = (l1_section(name) or "") if l1 else name, ""
         elif s == "-" or s.startswith("- "):
-            out += [Seg(t, section, sub) for t in split_segments(s[1:])]
+            out.append(BodyLine(s[1:].strip(), section, sub, True))
         elif s:
-            out.append(Seg(s, section, sub))
+            out.append(BodyLine(s, section, sub, False))
     return out
 
 

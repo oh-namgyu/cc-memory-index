@@ -18,8 +18,9 @@ from cc_memory_index.migrate_snapshot import SNAPSHOT_PREFIX, new_snapshot_id
 from cc_memory_index.safeio import StoreDir
 
 L0, MIGRATING, RECORD = "MEMORY.md", ".index-migrating", ".index-render.json"
-INDEX = ("# Memory\n\n## Rules\n- [A](a.md) — first · [B](b.md) — second\n- free text\n"
-         "### Sub\n- [A](a.md) — again\n")
+INDEX = ("# Memory\n\n## Rules\n- [A](a.md) — first · [B](b.md) — second\n  - a detail under A\n- free text\n"
+         "### Sub\n- [A](a.md) — again\n```\n- code, not an index line\n```\n")
+NOTES = "index-notes.md"
 
 
 def hand_store(base: Path) -> Path:
@@ -70,8 +71,8 @@ def test_crash_at_every_replace_then_rerun_converges(tmp_path: Path, monkeypatch
 def test_resume_plans_from_the_snapshot_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = hand_store(tmp_path)
     with monkeypatch.context() as m:
-        calls = record_replaces(m, crash_at=8)
-        assert run_migrate(str(root), apply=True).code == 6 and calls[-1] == "a.md"
+        calls = record_replaces(m, crash_at=9)
+        assert run_migrate(str(root), apply=True).code == 6 and calls[-2:] == [NOTES, "a.md"]
     write_index(root, INDEX + "- [C](c.md) — written after the crash\n")
     res = run_migrate(str(root), apply=True)
     assert res.code == 0 and res.messages[0].startswith("resuming the interrupted migration"), res.messages
@@ -160,7 +161,8 @@ def test_manifest_records_every_copy_and_its_intended_hash(tmp_path: Path) -> No
     assert res.code == 0, res.messages
     snap = root / res.stats["snapshot"]
     manifest = json.loads((snap / "manifest.json").read_text())
-    assert sorted(manifest["files"]) == [".index-pending.json", L0, "a.md", "b.md", "c.md"]
+    assert sorted(manifest["files"]) == [".index-pending.json", L0, "a.md", "b.md", "c.md", NOTES]
     assert manifest["files"]["c.md"]["after"] is None and manifest["files"]["a.md"]["after"] is not None
+    assert manifest["files"][NOTES]["before"] is None and not (snap / NOTES).exists()
     assert (snap / L0).read_text() == INDEX
     assert os.name != "posix" or snap.stat().st_mode & 0o777 == 0o700

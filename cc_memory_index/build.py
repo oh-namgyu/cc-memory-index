@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Sequence
+from typing import AbstractSet, Any, Iterator, Optional, Sequence
 
 from .fold import Folded, fold
 from .generated import as_text, backup_generated, edited_generated_files, record_bytes
@@ -41,6 +41,25 @@ class BuildResult:
     code: int
     messages: list[str] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
+
+
+def new_result() -> BuildResult:
+    """The result of a build before it runs: nothing rescued, kept as manual lines or refused yet."""
+    return BuildResult(EXIT_OK, stats={"rescued": [], "manual_added": [], "unrescuable": []})
+
+
+@contextlib.contextmanager
+def writing(sd: StoreDir, timeout_s: float, stats: dict[str, Any]) -> Iterator[None]:
+    """Hold the store lock for a command that writes, after removing the temporary files that a
+    killed write left behind (DESIGN §7.1, §7.4); stats['temp_removed'] counts them."""
+    with sd.lock(timeout_s):
+        stats["temp_removed"] = sd.sweep_temp()
+        yield
+
+
+def swept(*results: BuildResult) -> int:
+    """How many temporary files the commands behind results removed, together."""
+    return sum(int(r.stats.get("temp_removed", 0)) for r in results)
 
 
 @contextlib.contextmanager
@@ -80,19 +99,19 @@ def _force(sd: StoreDir, plan: Plan, edited: Sequence[Edited], res: BuildResult)
     res.messages.append(f"--force: regenerated hand-edited {names}; previous content saved as {', '.join(backups)}")
 
 
-def _context(plan: Plan, cfg: Config) -> Context:
+def _context(plan: Plan, cfg: Config, moved: AbstractSet[str]) -> Context:
     data = plan.inputs.data
     recorded = plan.parsed.l1_name if plan.parsed is not None else cfg.l1_name
     names = (cfg.l1_name,) if recorded == cfg.l1_name else (cfg.l1_name, recorded)
     sources = plan.inputs.scanned.sources
     max_order = max((it.order for it in plan.items), default=0)
     return Context(plan.rendered, data.manual.preamble, names, {src.name: src for src in sources},
-                   frozenset(e.file for e in data.pending), max_order, default_pieces(sources))
+                   frozenset(e.file for e in data.pending), max_order, default_pieces(sources) | moved)
 
 
-def _rescue(plan: Plan, cfg: Config, edited: Sequence[Edited], res: BuildResult) -> Rescue:
+def _rescue(plan: Plan, cfg: Config, edited: Sequence[Edited], moved: AbstractSet[str], res: BuildResult) -> Rescue:
     """Classify the lines added by hand; refuse (exit 3, nothing written) when any cannot be kept."""
-    found = analyse(edited, _context(plan, cfg))
+    found = analyse(edited, _context(plan, cfg, moved))
     res.stats["unrescuable"] = [{"segment": u.segment, "reason": u.reason} for u in found.unrescuable]
     if found.unrescuable:
         for u in found.unrescuable:
@@ -111,16 +130,17 @@ def _rescue(plan: Plan, cfg: Config, edited: Sequence[Edited], res: BuildResult)
     return found
 
 
-def _check_kept(old: Plan, new: Plan, cfg: Config, rescue: Rescue, edited: Sequence[Edited], force: bool) -> None:
+def _check_kept(old: Plan, new: Plan, cfg: Config, rescue: Rescue, edited: Sequence[Edited], force: bool,
+                moved: AbstractSet[str]) -> None:
     """DESIGN §6 invariant: no line of the current L0 and L1 is lost, or they are not replaced (exit 8).
 
-    Default lines and the lines of sources that changed during the run (patched, or edited
-    concurrently) may go; files given up with --force are not checked.
+    Default lines, the lines of sources that changed during the run (patched, or edited
+    concurrently) and moved lines may go; files given up with --force are not checked.
     """
     now = {src.name: src.fp for src in new.inputs.scanned.sources}
     changed = {src.name for src in old.inputs.scanned.sources if now.get(src.name) != src.fp}
     generated = {p for it in old.items if it.file in changed for p in pieces(it.idx)}
-    generated |= default_pieces(old.inputs.scanned.sources)
+    generated |= default_pieces(old.inputs.scanned.sources) | moved
     roles = {ed.role for ed in edited}
     current = [(as_text(cur.data), rescue.pieces.get(role) if role in roles else None)
                for role, cur in (("l0", old.l0), ("l1", old.l1)) if not (force and role in roles)]
@@ -134,7 +154,8 @@ def _check_kept(old: Plan, new: Plan, cfg: Config, rescue: Rescue, edited: Seque
         )
 
 
-def _settle(sd: StoreDir, cfg: Config, plan: Plan, force: bool, res: BuildResult) -> tuple[Plan, Folded]:
+def _settle(sd: StoreDir, cfg: Config, plan: Plan, force: bool, moved: AbstractSet[str],
+            res: BuildResult) -> tuple[Plan, Folded]:
     """Keep hand edits (DESIGN §6) or back them up (--force), fold pending lines (§6.1), and render
     again from fresh reads when anything was written."""
     edited = _edited(plan, res)
@@ -142,7 +163,7 @@ def _settle(sd: StoreDir, cfg: Config, plan: Plan, force: bool, res: BuildResult
     if edited and force:
         _force(sd, plan, edited, res)
     elif edited:
-        rescue = _rescue(plan, cfg, edited, res)
+        rescue = _rescue(plan, cfg, edited, moved, res)
     folded = Folded()
     res.stats["written"] = folded.written
     fold(sd, plan.inputs.data, plan.inputs.scanned.sources, rescue.entries, rescue.lines, folded)
@@ -153,7 +174,7 @@ def _settle(sd: StoreDir, cfg: Config, plan: Plan, force: bool, res: BuildResult
         new = rerender(sd, cfg, plan, res.stats, notes)
         res.messages.extend(note for note in notes if note not in res.messages)
     if edited or folded.written:
-        _check_kept(plan, new, cfg, rescue, edited, force)
+        _check_kept(plan, new, cfg, rescue, edited, force, moved)
     return new, folded
 
 
@@ -189,16 +210,25 @@ def _finish(plan: Plan, folded: Folded, res: BuildResult) -> None:
         res.code = EXIT_PARSE
 
 
+def build_locked(sd: StoreDir, cfg: Config, res: BuildResult, force: bool = False,
+                 moved: Optional[AbstractSet[str]] = None) -> None:
+    """Render the store and write the generated files; the caller holds the store lock.
+
+    moved is set only by migrate, before it removes its marker: the pieces of the lines it moved
+    from MEMORY.md to the notes file, which may leave MEMORY.md without being taken for hand edits.
+    """
+    plan = prepare(sd, cfg, EXIT_USAGE, res.stats, res.messages, migrating=moved is not None)
+    plan, folded = _settle(sd, cfg, plan, force, moved or frozenset(), res)
+    _write(sd, cfg, plan, res)
+    _finish(plan, folded, res)
+
+
 def run_build(store_path: str, force: bool) -> BuildResult:
     """Render the store and write the generated files under the store lock."""
-    res = BuildResult(EXIT_OK, stats={"rescued": [], "manual_added": [], "unrescuable": []})
+    res = new_result()
     with outcome(res), StoreDir(store_path) as sd:
-        with sd.lock(load_config(sd).lock_timeout_s):
-            cfg = load_config(sd)
-            plan = prepare(sd, cfg, EXIT_USAGE, res.stats, res.messages)
-            plan, folded = _settle(sd, cfg, plan, force, res)
-            _write(sd, cfg, plan, res)
-        _finish(plan, folded, res)
+        with writing(sd, load_config(sd).lock_timeout_s, res.stats):
+            build_locked(sd, load_config(sd), res, force)
     return res
 
 

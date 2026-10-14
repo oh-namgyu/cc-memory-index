@@ -134,7 +134,7 @@ def test_wiki_links_exact_variant_and_missing(tmp_path: Path) -> None:
 
 def test_warnings_for_names_oversized_idx_bad_names_and_no_frontmatter(tmp_path: Path) -> None:
     root = clean_store(tmp_path)
-    write_memory(root, "long.md", name="long", tier="resident", idx="[long](long.md) — " + "y" * 320)
+    write_memory(root, "long.md", name="long", tier="resident", idx="[long](long.md) — " + "y" * 1100)
     (root / "plain.md").write_text("just text, no frontmatter\n")
     (root / "_bad.md").write_text("x\n")
     (root / "a..b.md").write_text("x\n")
@@ -142,7 +142,7 @@ def test_warnings_for_names_oversized_idx_bad_names_and_no_frontmatter(tmp_path:
     assert (code, errors) == (0, [])
     assert sorted(w.split(":")[0].split(" ")[0] for w in warnings) == ["'_bad.md'", "'a..b.md'", "long.md",
                                                                         "plain.md", "tea.md"]
-    assert any("over item_max_bytes (300)" in w and "Overflow" in w for w in warnings)
+    assert any("over item_max_bytes (1024)" in w and "Overflow" in w for w in warnings)
     assert "plain.md has no frontmatter: it is indexed by its file name only" in warnings
 
 

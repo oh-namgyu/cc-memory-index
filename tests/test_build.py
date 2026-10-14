@@ -191,9 +191,9 @@ def test_pending_entries_are_rendered_and_folded(tmp_path: Path) -> None:
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["unresolved"] == 1
     l0, l1 = (root / L0).read_text(), (root / L1).read_text()
-    assert "## Rescued\n\n- [Tea](tea.md) — rescued line\n" in l0
+    assert "## Rescued\n- [Tea](tea.md) — rescued line\n" in l0
     assert l1.count("already folded") == 1 and "the file's own line" in l1
-    assert l1.endswith("## Unresolved\n\n- [c](conflict.md) — rescued but different\n")
+    assert l1.endswith("## Unresolved\n- [c](conflict.md) — rescued but different\n")
     assert json.loads((root / PENDING_NAME).read_text())["entries"] == entries[2:]
     assert '  idx: "[Tea](tea.md) — rescued line"\n  idx_section: "Rescued"\n' in (root / "tea.md").read_text()
     assert run_check(str(root)).code == 0
@@ -206,7 +206,7 @@ def test_manual_preamble_and_lines_are_rendered(tmp_path: Path) -> None:
     assert run_build(str(root), False).code == 0
     l0 = (root / L0).read_text()
     assert l0.startswith("# My memory\n\nRead me first.\n\n" + link_line(L1))
-    assert "## Rules\n\n- Ask before deleting data\n" in l0
+    assert "## Rules\n- Ask before deleting data\n" in l0
 
 
 def test_linked_l0_is_refused(tmp_path: Path, symlink: Callable[[Path, Path], None]) -> None:

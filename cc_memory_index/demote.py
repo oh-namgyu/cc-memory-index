@@ -8,8 +8,8 @@ from __future__ import annotations
 from typing import Sequence
 
 from . import frontmatter
-from .build import EXIT_OK, EXIT_PARSE, EXIT_USAGE, BuildResult, Refusal, outcome, run_build
-from .plan import refuse_if_migrating
+from .build import EXIT_OK, EXIT_PARSE, EXIT_USAGE, BuildResult, outcome, run_build, swept, writing
+from .plan import Refusal, refuse_if_migrating
 from .safeio import StoreDir
 from .store import L0_NAME, Config, Source, load_config, load_source, skip_reason, valid_source_name
 
@@ -59,7 +59,7 @@ def demote_files(store_path: str, files: Sequence[str]) -> BuildResult:
     res.stats["demoted"] = changed
     with outcome(res), StoreDir(store_path) as sd:
         cfg = load_config(sd)
-        with sd.lock(cfg.lock_timeout_s):
+        with writing(sd, cfg.lock_timeout_s, res.stats):
             refuse_if_migrating(sd, EXIT_USAGE)
             for name in files:
                 if set_indexed(sd, cfg, name):
@@ -68,7 +68,7 @@ def demote_files(store_path: str, files: Sequence[str]) -> BuildResult:
 
 
 def run_demote(store_path: str, file: str) -> BuildResult:
-    """Demote one memory, then build; the result is the build's, plus stats['demoted']."""
+    """Demote one memory, then build; the result is the build's, plus stats['demoted'] and both sweeps."""
     demoted = demote_files(store_path, [file])
     if demoted.code != EXIT_OK:
         return demoted
@@ -76,4 +76,5 @@ def run_demote(store_path: str, file: str) -> BuildResult:
     note = f"{file}: tier set to {INDEXED}" if demoted.stats["demoted"] else f"{file} already has tier {INDEXED}"
     res.messages.insert(0, note)
     res.stats["demoted"] = demoted.stats["demoted"]
+    res.stats["temp_removed"] = swept(demoted, res)
     return res

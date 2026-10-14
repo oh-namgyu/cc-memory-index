@@ -71,7 +71,7 @@ def test_line_without_a_memory_link_becomes_a_manual_line(tmp_path: Path, line: 
     seg = line[2:] if line.startswith("- ") else line
     assert res.code == 0 and res.stats["manual_added"] == [seg] and res.stats["rescued"] == []
     assert _manual(root) == [{"seg": seg, "section": "User", "sub": "", "order": 1000001}]
-    assert f"## User\n\n- [Tea](tea.md) — likes tea · {seg}\n" in (root / L0).read_text()
+    assert f"## User\n- [Tea](tea.md) — likes tea\n- {seg}\n" in (root / L0).read_text()
     assert not (root / PENDING_NAME).exists()
     _settled(root)
 
@@ -82,7 +82,7 @@ def test_manual_lines_keep_their_section_and_subsection(tmp_path: Path) -> None:
     assert run_build(str(root), False).code == 0
     assert [(m["seg"], m["section"], m["sub"], m["order"]) for m in _manual(root)] == [
         ("Back up first", "Rules", "Data", 1000001), ("Ask twice", "Rules", "Data", 1000002)]
-    assert (root / L0).read_text().endswith("## Rules\n\n### Data\n\n- Back up first · Ask twice\n")
+    assert (root / L0).read_text().endswith("## Rules\n\n### Data\n- Back up first\n- Ask twice\n")
     _settled(root)
 
 
@@ -144,7 +144,7 @@ def test_line_added_to_l1_is_rescued_too(tmp_path: Path) -> None:
     root = built_store(tmp_path)
     write_memory(root, "new_note.md", name="New note", type="project")
     text = (root / L1).read_text()
-    (root / L1).write_text(text.replace("## Project\n\n", "## Project\n\n- [New note](new_note.md) — from L1\n"))
+    (root / L1).write_text(text.replace("## Project\n", "## Project\n- [New note](new_note.md) — from L1\n"))
     res = run_build(str(root), False)
     assert res.code == 0
     assert res.stats["rescued"] == [{"file": "new_note.md", "idx": "[New note](new_note.md) — from L1"}]
@@ -152,19 +152,41 @@ def test_line_added_to_l1_is_rescued_too(tmp_path: Path) -> None:
     _settled(root)
 
 
-def test_packing_change_alone_is_not_an_edit_to_rescue(tmp_path: Path) -> None:
+def test_generated_lines_joined_or_moved_by_hand_are_not_an_edit_to_rescue(tmp_path: Path) -> None:
     root = make_store(tmp_path)
     for n in range(3):
         write_memory(root, f"m{n}.md", tier="resident", idx=f"[m{n}](m{n}.md) — short", idx_section="S")
     assert run_build(str(root), False).code == 0
     fresh = (root / L0).read_text()
-    packed = "- [m0](m0.md) — short · [m1](m1.md) — short · [m2](m2.md) — short\n"
-    assert packed in fresh
-    unpacked = "- [m2](m2.md) — short\n\n- [m0](m0.md) —   short · [m1](m1.md) — short\n"
-    (root / L0).write_text(fresh.replace(packed, unpacked))
+    lines = "".join(f"- [m{n}](m{n}.md) — short\n" for n in range(3))
+    assert "\n## S\n" + lines in fresh
+    joined = "- [m2](m2.md) — short\n\n- [m0](m0.md) —   short · [m1](m1.md) — short\n"
+    (root / L0).write_text(fresh.replace(lines, joined))
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["written"] == [L0] and (root / L0).read_text() == fresh
     assert (res.stats["rescued"], res.stats["manual_added"]) == ([], [])
+
+
+def test_generated_line_whose_idx_holds_separators_is_never_rescued(tmp_path: Path) -> None:
+    """One item per line: a generated line is compared whole first, so pieces of an idx that holds
+    ' · ' (here one linking to a memory without idx, one without any link) are never taken for lines
+    added by hand, even when the line is copied with other whitespace around the separators."""
+    root = make_store(tmp_path)
+    idx = "[Hub](hub.md) — start here · [Spoke](spoke.md) — details · see both"
+    write_memory(root, "hub.md", tier="resident", idx=idx, idx_section="S")
+    write_memory(root, "spoke.md", name="Spoke", description="details", type="project")
+    assert run_build(str(root), False).code == 0
+    fresh = (root / L0).read_text()
+    assert f"\n## S\n- {idx}\n" in fresh
+    copied = "- " + idx.replace(" · ", "\u00a0·\u3000")
+    (root / L0).write_text(fresh + copied + "\n- " + idx + "\n")
+    res = run_build(str(root), False)
+    assert res.code == 0 and (res.stats["rescued"], res.stats["manual_added"], res.stats["unrescuable"]) == ([], [], [])
+    assert (root / L0).read_text() == fresh and "idx" not in parse((root / "spoke.md").read_text()).metadata
+    append(root, L0, f"- {idx} · and a note added by hand\n")
+    res = run_build(str(root), False)
+    assert res.code == 0 and res.stats["manual_added"] == ["and a note added by hand"] and res.stats["rescued"] == []
+    _settled(root)
 
 
 def test_second_line_for_the_same_new_file_is_unrescuable(tmp_path: Path) -> None:
@@ -196,5 +218,5 @@ def test_deleted_head_lines_are_generated_and_come_back(tmp_path: Path) -> None:
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["manual_added"] == ["Ask first"]
     l0 = (root / L0).read_text()
-    assert l0.startswith(TITLE + "\n") and link_line(L1) in l0 and "· Ask first\n" in l0
+    assert l0.startswith(TITLE + "\n") and link_line(L1) in l0 and "\n- Ask first\n" in l0
     _settled(root)

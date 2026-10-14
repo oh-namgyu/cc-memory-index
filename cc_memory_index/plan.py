@@ -121,12 +121,14 @@ def refuse_if_migrating(sd: StoreDir, code: int) -> None:
         raise Refusal(code, f"{MIGRATING_MARK} exists: a migration was interrupted; run `migrate --apply` again")
 
 
-def prepare(sd: StoreDir, cfg: Config, refuse: int, stats: dict[str, Any], notes: list[str]) -> Plan:
+def prepare(sd: StoreDir, cfg: Config, refuse: int, stats: dict[str, Any], notes: list[str],
+            migrating: bool = False) -> Plan:
     """Read the store and render it, writing nothing; the caller decides whether to hold the lock.
 
-    refuse is the exit code for a store that is mid-migration or must be migrated first; problems
-    found on the way are appended to notes."""
-    refuse_if_migrating(sd, refuse)
+    refuse is the exit code for a store that is mid-migration (unless migrate itself asks, with
+    migrating) or must be migrated first; problems found on the way are appended to notes."""
+    if not migrating:
+        refuse_if_migrating(sd, refuse)
     l0, l1 = read_current(sd, L0_NAME), read_current(sd, cfg.l1_name)
     record = read_current(sd, RENDER_MARK, RECORD_MAX_BYTES)
     parsed = read_record(record)

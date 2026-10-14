@@ -20,7 +20,6 @@ from cc_memory_index.render import (
     head_lines,
     link_line,
     nbytes,
-    packable,
     reachable,
     render,
     render_order,
@@ -45,8 +44,8 @@ def test_default_l0_layout_is_exact() -> None:
     r = render(items, None, Config())
     assert r.l0 == "\n".join([
         TITLE, "", NOTE, "", link_line(L1),
-        "", "## B", "", "- b1",
-        "", "## A", "", "- a1", "", "### Sub", "", "- a2",
+        "", "## B", "- b1",
+        "", "## A", "- a1", "", "### Sub", "- a2",
     ]) + "\n"
     assert len([TITLE, "", NOTE]) <= 3 and "\r" not in r.l0 + r.l1
     assert (r.overflow, r.oversized, r.unresolved) == ([], [], [])
@@ -59,8 +58,8 @@ def test_l1_layout_is_exact() -> None:
     assert r.l1 == "\n".join([
         "---", "name: index-l1", f"description: {L1_DESCRIPTION}", "metadata:", "  type: reference",
         "  generated: true", "---", "", L1_TITLE, "", L1_NOTE,
-        "", "## X", "", "- x", "", "### Deep", "", "- y",
-        "", "## Unresolved", "", "- p",
+        "", "## X", "- x", "", "### Deep", "- y",
+        "", "## Unresolved", "- p",
     ]) + "\n"
     assert [it.idx for it in r.unresolved] == ["p"]
 
@@ -89,32 +88,24 @@ def test_render_is_deterministic_and_input_order_independent() -> None:
     assert render(list(reversed(items)), None, Config()) == first == render(items, None, Config())
 
 
-def _packed(idx_list: list[str], line_max: int = 80) -> list[str]:
+def _body_items(idx_list: list[str]) -> list[str]:
     items = [item(idx, order=n, file=f"f{n:02d}.md") for n, idx in enumerate(idx_list)]
-    body = _l0_body(render(items, None, Config(line_max_bytes=line_max)))
-    return [line for line in body if line.startswith(BULLET)]
+    return [line for line in _l0_body(render(items, None, Config())) if line.startswith(BULLET)]
 
 
-def test_packing_joins_up_to_the_line_cap() -> None:
-    a, b, c = "a" * 30, "b" * 30, "c" * 30
-    assert _packed([a, b, c]) == [f"- {a} · {b}", f"- {c}"]
-    assert nbytes(f"- {a} · {b}") == 66
+def test_every_item_has_a_line_of_its_own() -> None:
+    long = "L" * 1000
+    idx_list = ["a", long, "a · b", "[open", "x ] · (y", "c"]
+    assert _body_items(idx_list) == [BULLET + idx for idx in idx_list]
 
 
-def test_packing_exactly_at_the_line_cap() -> None:
-    a, b = "a" * 37, "b" * 37
-    assert _packed([a, b]) == [f"- {a} · {b}"] and nbytes(f"- {a} · {b}") == 80
-    assert _packed([a, b + "b"]) == [f"- {a}", f"- {b}b"]
-
-
-def test_item_longer_than_the_line_cap_sits_alone() -> None:
-    short1, long, short2, short3 = "s" * 10, "L" * 100, "t" * 10, "u" * 10
-    assert _packed([short1, long, short2, short3]) == [f"- {short1}", f"- {long}", f"- {short2} · {short3}"]
-
-
-def test_unpackable_items_sit_alone() -> None:
-    assert not packable("[open") and not packable("a · b") and packable("[ok](ok.md) — x")
-    assert _packed(["s1", "[open", "s2", "a · b", "s3", "s4"]) == ["- s1", "- [open", "- s2", "- a · b", "- s3 · s4"]
+def test_headings_are_followed_directly_by_their_lines() -> None:
+    items = [item("s1", "S", order=1, file="s1.md"), item("t1", "S", "T", order=2, file="t1.md"),
+             item("u1", "S", "U", order=3, file="u1.md"), item("v1", "V", "W", order=4, file="v1.md")]
+    r = render(items, None, Config())
+    assert _l0_body(r) == ["", "## S", "- s1", "", "### T", "- t1", "", "### U", "- u1",
+                           "", "## V", "", "### W", "- v1"]
+    assert r.l0.endswith("- v1\n") and "\n\n\n" not in r.l0 + r.l1
 
 
 def _sections(n: int, size: int = 150) -> list[Item]:
@@ -149,10 +140,11 @@ def test_fixed_cost_rejection() -> None:
     with pytest.raises(BudgetError, match="fixed part"):
         render([], None, Config(budget_bytes=2048, item_max_bytes=2000))
     with pytest.raises(BudgetError):
-        render([], "\n".join(f"line {n}" for n in range(140)), Config())
+        render([], "\n".join(f"line {n}" for n in range(155)), Config())
     with pytest.raises(BudgetError):
-        render([], "p" * 18500, Config())
-    render([], "\n".join(f"line {n}" for n in range(120)), Config())
+        render([], "p" * 19171, Config())
+    render([], "\n".join(f"line {n}" for n in range(154)), Config())
+    render([], "p" * 19170, Config())
 
 
 def test_oversized_item_goes_to_overflow_untruncated() -> None:
@@ -160,8 +152,8 @@ def test_oversized_item_goes_to_overflow_untruncated() -> None:
     items = [item("small", order=1, file="s.md"), item(huge, order=2, file="h.md"), item("tail", order=3, file="t.md")]
     r = render(items, None, Config(item_max_bytes=80))
     assert [it.idx for it in r.oversized] == [huge] and [it.idx for it in r.overflow] == [huge]
-    assert huge not in r.l0 and "- small · tail" in r.l0 and warning_line(1, L1) in r.l0
-    assert r.l1.endswith("## Overflow\n\n- " + huge + "\n")
+    assert huge not in r.l0 and "\n- small\n- tail\n" in r.l0 and warning_line(1, L1) in r.l0
+    assert r.l1.endswith("\n## Overflow\n- " + huge + "\n")
 
 
 def test_overflow_keeps_render_order_and_includes_manual_lines() -> None:
@@ -171,7 +163,7 @@ def test_overflow_keeps_render_order_and_includes_manual_lines() -> None:
     order = render_order(items)
     admitted = len(order) - len(r.overflow)
     assert r.overflow == order[admitted:] and any(it.origin == "manual" for it in r.overflow)
-    listed = r.l1.split("## Overflow\n\n")[1].rstrip("\n").split("\n")
+    listed = r.l1.split("## Overflow\n")[1].rstrip("\n").split("\n")
     assert listed == [BULLET + it.idx for it in r.overflow]
     assert warning_line(len(r.overflow), L1) in r.l0 and nbytes(r.l0) <= 3000
 
@@ -198,7 +190,7 @@ def _random_items(rng: random.Random) -> list[Item]:
 
 def _random_config(rng: random.Random) -> Config:
     return Config(budget_bytes=rng.randrange(2048, 7000), budget_lines=rng.randrange(20, 70),
-                  item_max_bytes=rng.randrange(80, 400), line_max_bytes=rng.randrange(80, 300))
+                  item_max_bytes=rng.randrange(80, 400))
 
 
 def test_property_budget_warning_reachability_and_incremental_size() -> None:
@@ -235,7 +227,9 @@ def test_reachable_reports_missing_items_and_pending() -> None:
              item("u", file="c.md", origin="pending", resident=False)]
     r = render(items, None, Config())
     assert reachable(items, r) == []
-    assert reachable(items, dataclasses.replace(r, l0=r.l0.replace("- m · same · same", "- m · same"))) == ["b.md"]
+    assert reachable(items, dataclasses.replace(r, l0=r.l0.replace("- same\n- same\n", "- same\n"))) == ["b.md"]
+    joined = dataclasses.replace(r, l0=r.l0.replace("- m\n- same\n- same\n", "- m · same · same\n"))
+    assert reachable(items, joined) == []
     assert reachable(items, dataclasses.replace(r, l1=r.l1.replace("- u\n", ""))) == ["pending line for c.md"]
     pending = [PendingEntry("a.md", "same", "", "", 0), PendingEntry("z.md", "nowhere", "", "", 0)]
     assert reachable(items, r, pending) == ["pending line for z.md"]
@@ -246,7 +240,7 @@ def test_l1_sections_named_like_its_own_headings_get_a_suffix() -> None:
              item("p", "P", file="p.md", origin="pending", resident=False), item("r", "Overflow", file="r.md")]
     r = render(items, None, Config())
     assert r.l1.split(L1_NOTE + "\n")[1] == "\n".join([
-        "", "## Overflow (section)", "", "- o", "", "## unresolved (section)", "", "- u",
-        "", "## Unresolved", "", "- p",
+        "", "## Overflow (section)", "- o", "", "## unresolved (section)", "- u",
+        "", "## Unresolved", "- p",
     ]) + "\n"
-    assert "## Overflow\n\n- r\n" in r.l0
+    assert "## Overflow\n- r\n" in r.l0

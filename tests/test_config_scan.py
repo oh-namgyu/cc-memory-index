@@ -27,15 +27,16 @@ def test_config_defaults(tmp_path: Path) -> None:
     with _store(tmp_path) as sd:
         cfg = load_config(sd)
     assert cfg == Config()
-    assert (cfg.budget_bytes, cfg.budget_lines, cfg.item_max_bytes, cfg.line_max_bytes) == (18432, 135, 300, 230)
+    assert (cfg.budget_bytes, cfg.budget_lines, cfg.item_max_bytes) == (20480, 160, 1024)
     assert (cfg.l1_name, cfg.lock_timeout_s) == ("index-l1.md", 5)
 
 
 def test_config_values_and_inclusive_bounds(tmp_path: Path) -> None:
-    values = {"budget_bytes": 25000, "budget_lines": 20, "item_max_bytes": 80, "line_max_bytes": 2000,
-              "l1_name": "index-more.md", "lock_timeout_s": 1.5}
+    values = {"budget_bytes": 25000, "budget_lines": 20, "item_max_bytes": 80, "l1_name": "index-more.md",
+              "lock_timeout_s": 1.5}
     with _store(tmp_path, values) as sd:
         assert load_config(sd) == Config(**values)
+    assert Config(budget_bytes=2048, budget_lines=200, item_max_bytes=4096).item_max_bytes == 4096
 
 
 def test_config_accepts_bom(tmp_path: Path) -> None:
@@ -55,9 +56,8 @@ def test_config_accepts_bom(tmp_path: Path) -> None:
         {"budget_lines": 19},
         {"budget_lines": 201},
         {"item_max_bytes": 79},
-        {"item_max_bytes": 2001},
-        {"line_max_bytes": 79},
-        {"line_max_bytes": 2001},
+        {"item_max_bytes": 4097},
+        {"line_max_bytes": 230},
         {"lock_timeout_s": 0.5},
         {"lock_timeout_s": 61},
         {"lock_timeout_s": "5"},

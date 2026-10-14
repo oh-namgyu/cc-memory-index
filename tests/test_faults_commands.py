@@ -33,6 +33,26 @@ RULES = """# Rules
 - Ask before deleting anything
 - Never push to main
 """
+NOTED = """# Memory
+
+## Rules
+- [A](a.md) — first · [B](b.md) — second
+  - a detail under A
+- Ask before deleting anything
+
+```sh
+- make test   # a list line inside a code block
+```
+Some paragraph.
+| key | value |
+|---|---|
+### Sub
+- [C](c.md) — third
+> quoted after a heading
+<!--
+- [D](d.md) — commented out
+-->
+"""
 TIGHT = {"budget_bytes": 2048, "budget_lines": 20}
 
 
@@ -84,6 +104,8 @@ def _over_budget(base: Path) -> Path:
 COMMANDS = [
     Scenario("migrate", _hand, _apply, _original),
     Scenario("migrate-rules-only", _rules_only, _apply, lambda root: index_segments(RULES) | fm_values(root)),
+    Scenario("migrate-notes", lambda base: _hand(base, NOTED), _apply,
+             lambda root: index_segments(NOTED) | fm_values(root)),
     Scenario("restore", _migrated, _restore, lambda root: index_segments(INDEX)),
     Scenario("demote", built_store, lambda root: run_demote(str(root), "build.md").code,
              lambda root: index_segments((root / L0).read_text(encoding="utf-8")) | {"Build", "make test"}),
@@ -98,18 +120,24 @@ def test_command_converges_after_a_failed_write(
     assert check_converges(tmp_path, Faults(monkeypatch), sc, seed=11) >= 4
 
 
-def test_rerun_after_the_first_build_of_a_rules_only_migration_failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("last", [".index-render.json", ".index-migrating"])
+def test_rules_only_migration_interrupted_at_its_last_write_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, last: str
 ) -> None:
-    """Such a migration writes manual lines only, so no memory file has a tier. A rerun used to take
-    the store for a hand-written one and migrate the generated MEMORY.md, link line included."""
-    root = _rules_only(tmp_path)
+    """Such a migration writes manual lines only, so no memory file has a tier. A rerun after its
+    index was written must resume the migration, never migrate the generated MEMORY.md again."""
+    (tmp_path / "clean").mkdir()
+    (tmp_path / "root").mkdir()
+    clean, root = _rules_only(tmp_path / "clean"), _rules_only(tmp_path / "root")
     faults = Faults(monkeypatch)
-    assert faults.run(lambda: _apply(root), 12, "EACCES") == 6 and faults.calls[-1] == ".index-render.json"
+    assert faults.run(lambda: _apply(clean)) == 0
+    at = len(faults.calls) - faults.calls[::-1].index(last)
+    assert faults.run(lambda: _apply(root), at, "EACCES") == 6 and faults.calls[-1] == last
     res = run_migrate(str(root), apply=True)
-    assert res.code == 0 and "never built" in res.messages[0], res.messages
+    assert res.code == 0 and res.messages[0].startswith("resuming the interrupted migration"), res.messages
     assert len([p for p in root.iterdir() if p.name.startswith(SNAPSHOT_PREFIX)]) == 1
     assert (root / L0).read_text(encoding="utf-8").count("Not loaded every session") == 1
+    assert run_check(str(root)).code == 0
 
 
 def test_rerun_of_suggest_apply_builds_when_nothing_is_left_to_demote(

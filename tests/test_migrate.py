@@ -40,7 +40,7 @@ def _pieces(text: str) -> set[str]:
 
 
 def _segments(index: str) -> list[str]:
-    return [seg.text for seg in split_index(index)[1]]
+    return [seg.text for seg in split_index(index).segments]
 
 
 def test_frontmatter_block_and_intro_become_the_preamble(tmp_path: Path) -> None:
@@ -72,7 +72,10 @@ def test_every_original_segment_stays_in_l0(tmp_path: Path) -> None:
     l0 = (root / L0).read_text()
     assert all(normalize_ws(seg) in _pieces(l0) for seg in _segments(SECTIONED))
     assert "never-listed.md" not in l0 and "[never-listed](never-listed.md)" in (root / L1).read_text()
-    assert res.stats["resident"] == 4 and res.stats["manual"] == 3 and res.stats["untouched"] == 1
+    assert res.stats["resident"] == 4 and res.stats["manual"] == 2 and res.stats["untouched"] == 1
+    assert (res.stats["notes"], res.stats["notes_file"]) == (1, "index-notes.md")
+    notes = (root / "index-notes.md").read_text()
+    assert notes.endswith("\n## Rules\n\n### Tools\nSome paragraph that is not a list line.\n")
     assert _meta(root, "lint.md") == {"tier": "resident", "idx": "[Lint](lint.md) — ruff, then mypy",
                                       "idx_section": "Rules", "idx_sub": "Tools", "idx_order": "40"}
     assert "tier" not in _meta(root, "never-listed.md")
@@ -130,13 +133,15 @@ def test_crlf_or_bom_index_migrates_like_lf(tmp_path: Path) -> None:
 
 def test_split_index_edge_cases() -> None:
     text = ("---\ntags:\n- not a list item\n---\n# T\n\n- first\n  - nested · two\n##no space\n### Sub\n\n## \n"
-            "- under an empty heading\n")
-    preamble, segments = split_index(text)
-    assert preamble == "---\ntags:\n- not a list item\n---\n# T"
-    assert [(s.text, s.section, s.sub, s.order, s.line) for s in segments] == [
-        ("first", "Other", "", 10, 7), ("nested", "Other", "", 20, 8), ("two", "Other", "", 30, 8),
-        ("##no space", "Other", "", 40, 9), ("under an empty heading", "Other", "", 50, 13)]
-    assert split_index("\n\n") == (None, [])
+            "- under an empty heading\n- \n* star\n")
+    index = split_index(text)
+    assert index.preamble == "---\ntags:\n- not a list item\n---\n# T"
+    assert [(s.text, s.section, s.sub, s.order, s.line) for s in index.segments] == [
+        ("first", "Other", "", 10, 7), ("under an empty heading", "Other", "", 20, 13)]
+    assert index.notes.lines == ["  - nested · two", "##no space", "- ", "* star"]
+    assert index.notes.body == ["", "  - nested · two", "##no space", "", "## ", "- ", "* star"]
+    empty = split_index("\n\n")
+    assert (empty.preamble, empty.segments, empty.notes.lines) == (None, [], [])
 
 
 def test_over_budget_index_fits_and_overflows_to_l1(tmp_path: Path) -> None:
@@ -150,7 +155,7 @@ def test_over_budget_index_fits_and_overflows_to_l1(tmp_path: Path) -> None:
     res = run_migrate(str(root), apply=True)
     assert res.code == 0 and "suggest" in " ".join(res.messages)
     l0, l1 = (root / L0).read_bytes(), (root / L1).read_text()
-    assert len(l0) <= 18432 and l0.count(b"\n") <= 135 and "## Overflow" in l1
+    assert len(l0) <= 20480 and l0.count(b"\n") <= 160 and "## Overflow" in l1
     assert set(map(normalize_ws, _segments(index))) <= _pieces(l0.decode()) | _pieces(l1)
     assert all(_meta(root, f"m{n:03d}.md")["tier"] == "resident" for n in range(300))
 
@@ -162,11 +167,14 @@ def test_dry_run_writes_nothing_and_predicts_the_result(tmp_path: Path) -> None:
     assert res.code == 0 and snapshot(root) == before and not (root / ".index.lock").exists()
     stats = dict(res.stats)
     lines = summary(res)
-    assert lines[0].startswith("migrate (dry run): 4 memory files resident, 3 manual lines") and "--apply" in lines[2]
+    assert lines[0].startswith("migrate (dry run): 4 memory files resident, 2 manual lines") and "--apply" in lines[3]
+    assert lines[2] == ("1 line(s) that are not index lines (code blocks, nested lists, paragraphs) would move"
+                        " verbatim to index-notes.md")
     applied = run_migrate(str(root), apply=True)
     assert applied.code == 0
     assert stats["l0_bytes"] == len((root / L0).read_bytes()) == applied.stats["l0_bytes"]
-    assert summary(applied)[2].startswith(f"snapshot {applied.stats['snapshot']}: undo with")
+    assert summary(applied)[2].endswith("moved verbatim to index-notes.md")
+    assert summary(applied)[3].startswith(f"snapshot {applied.stats['snapshot']}: undo with")
 
 
 def test_flat_list_without_headings(tmp_path: Path) -> None:
@@ -175,7 +183,7 @@ def test_flat_list_without_headings(tmp_path: Path) -> None:
     assert run_migrate(str(root), apply=True).code == 0
     assert json.loads((root / MANUAL).read_text())["preamble"] == "# Memory Index"
     assert _meta(root, "a.md")["idx_section"] == "Other"
-    assert "## Other\n\n- [A](a.md) — x · [B](b.md) — y\n" in (root / L0).read_text()
+    assert "## Other\n- [A](a.md) — x\n- [B](b.md) — y\n" in (root / L0).read_text()
 
 
 def test_already_migrated_store_is_left_unchanged(tmp_path: Path) -> None:
@@ -222,7 +230,7 @@ def test_index_without_memory_links(tmp_path: Path) -> None:
     root = _store(tmp_path, index, "a.md")
     res = run_migrate(str(root), apply=True)
     assert res.code == 0, res.messages
-    assert "## Rules\n\n- Ask before deleting anything · Prefer small commits\n" in (root / L0).read_text()
+    assert "## Rules\n- Ask before deleting anything\n- Prefer small commits\n" in (root / L0).read_text()
     assert run_migrate(str(root), apply=True).code == 0
 
 

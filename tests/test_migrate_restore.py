@@ -32,7 +32,8 @@ def test_restore_round_trip(tmp_path: Path) -> None:
     res = run_migrate(str(root), restore=ident)
     assert res.code == 0 and res.stats["conflicts"] == [], res.messages
     assert _top(root) == original and (root / (SNAPSHOT_PREFIX + ident) / "manifest.json").is_file()
-    assert summary(res) == [f"restored 6 file(s) from {SNAPSHOT_PREFIX}{ident}; 0 left alone"]
+    assert summary(res) == [f"restored 7 file(s) from {SNAPSHOT_PREFIX}{ident}; 0 left alone"]
+    assert "index-notes.md" in res.stats["restored"]
     assert run_migrate(str(root), restore=ident).code == 0 and _top(root) == original
     again = run_migrate(str(root), apply=True)
     assert again.code == 0 and again.stats["snapshot"] != SNAPSHOT_PREFIX + ident

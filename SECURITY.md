@@ -24,6 +24,10 @@ steer it. Everything in a memory file is therefore treated as **untrusted data**
   `../../.ssh/id_rsa.md` is ignored and reported, never opened.
 * Nothing is truncated: text that is too long for `MEMORY.md` is listed in the on-demand index
   instead. The tool moves content; it never amplifies it.
+* `migrate` moves the text of a hand-written `MEMORY.md` that is not an index line verbatim into
+  the body of a new memory file, below a frontmatter block the tool writes itself, so that text
+  cannot add frontmatter keys or index headings. It is then no longer loaded every session; only
+  the notes file's index line is.
 
 **Not covered:** this tool does not judge whether a memory's *meaning* is malicious (for
 example, an instruction planted through prompt injection). It keeps such text where it was put;
@@ -40,12 +44,19 @@ reviewing what Claude remembers is still up to you (`/memory` in Claude Code).
   but does not close it.
 * Every write replaces one file atomically (temporary file, `fsync`, rename). Writes are ordered
   so that stopping between any two leaves a valid store, and running the command again finishes
-  the job. There is no rollback that could put old content over a newer edit.
+  the job. There is no rollback that could put old content over a newer edit. A temporary file
+  left by a process killed mid-write is removed by the next writing command once it is 10
+  minutes old; only regular, singly linked files matching this tool's exact temp-name pattern are
+  removed, never links or directories.
 * Claude Code's own Write and Edit tools do not take this tool's lock. Each file is fingerprinted
   when read and checked again immediately before it is replaced; if it changed, it is left alone
   and the command asks to be rerun. A concurrent edit that lands in the instant between that
-  final check and the rename can still be overwritten. Within one session the hook runs after
-  the tool call has finished, so the hook does not race its own session.
+  final check and the rename (about 80 µs per index write) can still be overwritten. Within one
+  session the hook runs after the tool call has finished, so only another session writing the
+  same store at that instant can hit it, and what it can lose is an index line: the memory file
+  it points to is written first, is not touched by this race, and stays listed in the on-demand
+  index. Closing the window would need an atomic directory-entry exchange, which the Python
+  standard library does not provide portably.
 * A malicious process running as your own user already has the same access as this tool and is
   out of scope.
 

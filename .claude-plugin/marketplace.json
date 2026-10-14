@@ -1,0 +1,15 @@
+{
+  "name": "cc-memory-index",
+  "description": "cc-memory-index: a generated, size-bounded auto-memory index for Claude Code",
+  "owner": {
+    "name": "oh-namgyu",
+    "url": "https://github.com/oh-namgyu"
+  },
+  "plugins": [
+    {
+      "name": "cc-memory-index",
+      "source": "./",
+      "description": "Rebuilds MEMORY.md from each memory file's frontmatter after Claude writes a memory: always within the load limit, and a line Claude adds by hand is moved into its memory file instead of being lost."
+    }
+  ]
+}
