@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "cc-memory-index",
+  "version": "0.1.0",
+  "description": "Keeps Claude Code's auto-memory index (MEMORY.md) generated from each memory file's frontmatter: always within the load limit, and a line Claude adds by hand is moved into its memory file instead of being lost.",
+  "author": {
+    "name": "oh-namgyu",
+    "url": "https://github.com/oh-namgyu"
+  },
+  "repository": "https://github.com/oh-namgyu/cc-memory-index",
+  "license": "MIT",
+  "keywords": ["memory", "auto-memory", "MEMORY.md", "index", "hooks"]
+}

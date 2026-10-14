@@ -10,7 +10,7 @@ from typing import Any, Callable
 import pytest
 from storekit import built_store, make_store, sample_store, snapshot, write_json, write_memory
 
-from cc_memory_index import build as build_mod
+from cc_memory_index import plan as plan_mod
 from cc_memory_index.build import run_build, run_check
 from cc_memory_index.items import MANUAL_NAME, PENDING_NAME
 from cc_memory_index.render import link_line
@@ -27,7 +27,8 @@ def test_build_writes_l1_l0_and_record(tmp_path: Path) -> None:
     l0, l1 = (root / L0).read_bytes(), (root / L1).read_bytes()
     assert b"\r" not in l0 + l1 and b"[Build](build.md)" in l0 and b"[Old](old.md)" in l1
     record = json.loads((root / MARK).read_text())
-    assert record == {"version": 1, "l0": hashlib.sha256(l0).hexdigest(), "l1": hashlib.sha256(l1).hexdigest()}
+    assert record == {"version": 1, "l0": hashlib.sha256(l0).hexdigest(), "l1": hashlib.sha256(l1).hexdigest(),
+                      "l1_name": L1}
     assert res.stats["l0_bytes"] == len(l0) and res.stats["l0_lines"] == l0.count(b"\n")
 
 
@@ -91,15 +92,15 @@ def test_migration_marker_blocks_every_command(tmp_path: Path) -> None:
     assert snapshot(root) == before
 
 
-def _race(monkeypatch: pytest.MonkeyPatch, action: Callable[[], None]) -> None:
-    real = build_mod.render
+def _race(monkeypatch: pytest.MonkeyPatch, action: Callable[[], object]) -> None:
+    real = plan_mod.render
 
     def racing(*args: Any, **kwargs: Any) -> Any:
         out = real(*args, **kwargs)
         action()
         return out
 
-    monkeypatch.setattr(build_mod, "render", racing)
+    monkeypatch.setattr(plan_mod, "render", racing)
 
 
 def test_concurrent_edit_exits_4_and_leaves_the_file_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,13 +151,13 @@ def test_overflow_exits_1_and_still_writes(tmp_path: Path) -> None:
 
 def test_unreachable_item_exits_8_and_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = sample_store(tmp_path)
-    real = build_mod.render
+    real = plan_mod.render
 
     def lossy(*args: Any, **kwargs: Any) -> Any:
         out = real(*args, **kwargs)
         return dataclasses.replace(out, l1=out.l1.replace("- [Old](old.md) — an old project note\n", ""))
 
-    monkeypatch.setattr(build_mod, "render", lossy)
+    monkeypatch.setattr(plan_mod, "render", lossy)
     res = run_build(str(root), False)
     assert res.code == 8 and "old.md" in res.messages[-1]
     assert not (root / L0).exists() and not (root / L1).exists() and not (root / MARK).exists()
@@ -177,7 +178,7 @@ def test_configuration_errors_exit_2(tmp_path: Path, name: str, content: str) ->
     assert not (root / L0).exists()
 
 
-def test_pending_entries_are_rendered(tmp_path: Path) -> None:
+def test_pending_entries_are_rendered_and_folded(tmp_path: Path) -> None:
     root = sample_store(tmp_path)
     write_memory(root, "same.md", idx="already folded")
     write_memory(root, "conflict.md", idx="the file's own line")
@@ -187,14 +188,15 @@ def test_pending_entries_are_rendered(tmp_path: Path) -> None:
         {"file": "conflict.md", "idx": "[c](conflict.md) — rescued but different", "section": "", "sub": "", "order": 0},
     ]
     write_json(root, PENDING_NAME, {"version": 1, "entries": entries})
-    pending = (root / PENDING_NAME).read_bytes()
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["unresolved"] == 1
     l0, l1 = (root / L0).read_text(), (root / L1).read_text()
     assert "## Rescued\n\n- [Tea](tea.md) — rescued line\n" in l0
     assert l1.count("already folded") == 1 and "the file's own line" in l1
     assert l1.endswith("## Unresolved\n\n- [c](conflict.md) — rescued but different\n")
-    assert (root / PENDING_NAME).read_bytes() == pending
+    assert json.loads((root / PENDING_NAME).read_text())["entries"] == entries[2:]
+    assert '  idx: "[Tea](tea.md) — rescued line"\n  idx_section: "Rescued"\n' in (root / "tea.md").read_text()
+    assert run_check(str(root)).code == 0
 
 
 def test_manual_preamble_and_lines_are_rendered(tmp_path: Path) -> None:

@@ -40,7 +40,7 @@ def test_options_before_the_command(tmp_path: Path, capsys: pytest.CaptureFixtur
 def test_json_reports_refusals(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root = built_store(tmp_path)
     with (root / "MEMORY.md").open("a") as f:
-        f.write("- by hand\n")
+        f.write("- [x](missing.md) — points at no memory file\n")
     code, obj, err = _json(capsys, ["build", "--json", "--dir", str(root)])
     assert code == obj["code"] == 3 and err == ""
     messages = obj["messages"]
@@ -103,7 +103,7 @@ def test_usage_errors_exit_2(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_extension_point_lists_the_commands() -> None:
-    assert list(cli.COMMANDS) == ["build", "check"]
+    assert list(cli.COMMANDS) == ["build", "check", "lint", "suggest", "demote", "migrate"]
 
 
 def test_python_dash_m_help() -> None:

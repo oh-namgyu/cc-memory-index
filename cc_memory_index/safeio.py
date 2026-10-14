@@ -170,25 +170,27 @@ class StoreDir:
         return self._lstat(name).st_nlink
 
     def read(self, name: str, max_bytes: int = 4 * 1024 * 1024) -> tuple[bytes, Fingerprint]:
+        data = b"".join(self.iter_chunks(name, fsprim.CHUNK, max_bytes))
+        return data, _fingerprint(data)
+
+    def iter_chunks(self, name: str, chunk: int, max_bytes: int) -> Iterator[bytes]:
+        """Stream an entry with read's refusals; TooLarge once more than max_bytes were read."""
         fd = self._open_regular(name)
         try:
-            data, size, digest = fsprim.drain(fd, max_bytes, keep=True)
+            size = 0
+            for piece in fsprim.stream(fd, chunk, max_bytes):
+                size += len(piece)
+                if size > max_bytes:
+                    raise TooLarge(f"{name} is larger than {max_bytes} bytes")
+                yield piece
         finally:
             os.close(fd)
-        if size > max_bytes:
-            raise TooLarge(f"{name} is larger than {max_bytes} bytes")
-        return data, Fingerprint(size, digest)
 
     def fingerprint(self, name: str) -> Optional[Fingerprint]:
         try:
-            fd = self._open_regular(name)
+            return Fingerprint(*fsprim.digest(self.iter_chunks(name, fsprim.CHUNK, fsprim.NO_LIMIT)))
         except FileNotFoundError:
             return None
-        try:
-            _, size, digest = fsprim.drain(fd, None, keep=False)
-            return Fingerprint(size, digest)
-        finally:
-            os.close(fd)
 
     def _verify(self, name: str, expect: Expect) -> Optional[os.stat_result]:
         """Refuse unsafe targets and changed content; returns the target's lstat or None."""

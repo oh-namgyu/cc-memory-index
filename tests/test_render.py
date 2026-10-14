@@ -239,3 +239,14 @@ def test_reachable_reports_missing_items_and_pending() -> None:
     assert reachable(items, dataclasses.replace(r, l1=r.l1.replace("- u\n", ""))) == ["pending line for c.md"]
     pending = [PendingEntry("a.md", "same", "", "", 0), PendingEntry("z.md", "nowhere", "", "", 0)]
     assert reachable(items, r, pending) == ["pending line for z.md"]
+
+
+def test_l1_sections_named_like_its_own_headings_get_a_suffix() -> None:
+    items = [item("o", "Overflow", resident=False, file="o.md"), item("u", "unresolved", resident=False, file="u.md"),
+             item("p", "P", file="p.md", origin="pending", resident=False), item("r", "Overflow", file="r.md")]
+    r = render(items, None, Config())
+    assert r.l1.split(L1_NOTE + "\n")[1] == "\n".join([
+        "", "## Overflow (section)", "", "- o", "", "## unresolved (section)", "", "- u",
+        "", "## Unresolved", "", "- p",
+    ]) + "\n"
+    assert "## Overflow\n\n- r\n" in r.l0

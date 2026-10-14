@@ -21,7 +21,11 @@ from cc_memory_index.items import (
     items_from_sources,
     load_manual,
     load_pending,
+    manual_bytes,
     manual_items,
+    pending_bytes,
+    read_manual,
+    read_pending,
 )
 from cc_memory_index.safeio import Fingerprint, StoreDir
 from cc_memory_index.store import Source
@@ -193,3 +197,18 @@ def test_data_file_size_cap_and_links(tmp_path: Path, symlink: Any) -> None:
         symlink(root / MANUAL_NAME, outside)
         with pytest.raises(DataFileError, match="cannot read"):
             load_manual(sd)
+
+
+def test_data_files_round_trip_with_fingerprints(tmp_path: Path) -> None:
+    manual = Manual("# Hi\n", [ManualLine("가 · x", "S", "", -3)])
+    pending = [PendingEntry("a.md", "[a](a.md) — é", "S", "T", 10**18 - 1)]
+    with _sd(tmp_path) as sd:
+        assert read_manual(sd) == (Manual(None, []), None) and read_pending(sd) == ([], None)
+        root = Path(sd.path)
+        (root / MANUAL_NAME).write_bytes(manual_bytes(manual))
+        (root / PENDING_NAME).write_bytes(pending_bytes(pending))
+        (got, fp), (entries, pfp) = read_manual(sd), read_pending(sd)
+        assert got == manual and entries == pending
+        assert fp == sd.fingerprint(MANUAL_NAME) and pfp == sd.fingerprint(PENDING_NAME)
+        (root / PENDING_NAME).write_bytes(pending_bytes([]))
+        assert load_pending(sd) == [] and "가" in (root / MANUAL_NAME).read_text(encoding="utf-8")

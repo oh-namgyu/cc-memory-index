@@ -88,3 +88,66 @@ def built_store(tmp_path: Path, config: Optional[dict[str, Any]] = None) -> Path
     root = sample_store(tmp_path, config)
     assert run_build(str(root), False).code == 0
     return root
+
+
+TRANSCRIPT_EPOCH = 1_700_000_000
+
+
+def project_store(tmp_path: Path, config: Optional[dict[str, Any]] = None) -> Path:
+    """A store inside a project directory, which holds the project's transcripts (DESIGN §12)."""
+    project = tmp_path / "project"
+    project.mkdir()
+    return make_store(project, config)
+
+
+def write_transcript(directory: Path, name: str, text: str, age_s: int = 0) -> Path:
+    """A transcript file modified age_s seconds before a fixed epoch (smaller age = newer)."""
+    path = directory / name
+    path.write_bytes(text.encode("utf-8"))
+    os.utime(path, (TRANSCRIPT_EPOCH - age_s, TRANSCRIPT_EPOCH - age_s))
+    return path
+
+
+def write_index(root: Path, text: str, eol: str = "\n") -> Path:
+    """A hand-written MEMORY.md with the given line ending."""
+    path = root / "MEMORY.md"
+    path.write_bytes(text.replace("\n", eol).encode("utf-8"))
+    return path
+
+
+def tree(root: Path) -> dict[str, bytes]:
+    """Every regular file under root by relative path, the lock file left out. A migration
+    snapshot directory is renamed .index-backup-ID and the id in its manifest blanked, so runs
+    made at different times compare equal."""
+    out: dict[str, bytes] = {}
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if not path.is_file() or path.is_symlink() or rel == ".index.lock":
+            continue
+        data = path.read_bytes()
+        top, _, rest = rel.partition("/")
+        if top.startswith(".index-backup-") and rest:
+            if rest == "manifest.json":
+                data = data.replace(top[len(".index-backup-"):].encode(), b"ID")
+            rel = ".index-backup-ID/" + rest
+        out[rel] = data
+    return out
+
+
+def contents(root: Path) -> dict[str, bytes]:
+    """Every regular file's bytes, for comparing two stores; the lock file is left out."""
+    return {name: data for name, (data, _) in snapshot(root).items()}
+
+
+def append(root: Path, name: str, text: str) -> None:
+    with (root / name).open("a", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
+def claude_adds_memory(root: Path, file: str = "new_note.md", line: str = "") -> str:
+    """What Claude Code's built-in memory instructions do: write a memory file (frontmatter, no idx)
+    and append its index line to MEMORY.md. Returns the line."""
+    write_memory(root, file, name="New note", description="a new memory", type="project")
+    line = line or f"- [New note]({file}) — why it matters"
+    append(root, "MEMORY.md", line + "\n")
+    return line

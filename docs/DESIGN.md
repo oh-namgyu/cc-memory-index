@@ -93,9 +93,12 @@ Every source becomes an *item* `{file, idx, section, sub, order, tier}`. Items f
 `.index-manual.json` and `.index-pending.json` join the same list (§6).
 
 * Sections are ordered by the smallest `order` they contain (then by name), subsections the
-  same way, items by `(order, file)`.
+  same way, items by `(order, file)`. Within a section, items without a subsection come first,
+  so they never appear under another subsection's heading.
 * L0 packs the items of one subsection into lines joined by ` · `, up to 230 bytes per line;
-  an item longer than that sits alone on its line.
+  an item longer than that sits alone on its line, and so does an item whose text contains a
+  top-level ` · ` or an unbalanced bracket, so that splitting a line back into items (§6)
+  always gives the original items.
 * L0 always starts with the preamble, then a link line to L1, then the budget warning line
   when anything overflowed (§4.1).
 * L1 lists one item per line: all non-resident items by section, then an `Overflow` section,
@@ -122,7 +125,8 @@ and a **reserved** warning line, so adding the warning can never push L0 over bu
    `build` exits 1. Frontmatter is not changed: overflow is never a silent demotion.
 
 After rendering, every source, manual line and pending entry must be reachable from L0 or L1.
-If not, nothing is written (exit 8, internal invariant).
+If not, nothing is written (exit 8, internal invariant). A source whose frontmatter cannot be
+parsed is still listed in L1 by name and reported (exit 7), so it never silently disappears.
 
 ## 5. Untrusted input
 
@@ -156,7 +160,8 @@ transcripts, 50 MiB per transcript, 200 MiB in total.
 
 Claude Code's built-in memory instructions tell Claude to add a line to `MEMORY.md` after
 writing a memory. A generator that overwrote those lines would lose them silently, so every
-write first compares the current L0 and L1 with the hashes in `.index-render.json`. On a
+write first compares the current L0 and L1 with the hashes in `.index-render.json`. A file that
+already equals the fresh render is not an edit (that is how an interrupted build converges). On a
 mismatch, each *segment* (a ` · `-separated piece of a list line, split outside brackets and
 parentheses) of the current file that is not in the new render is classified:
 
@@ -170,8 +175,10 @@ parentheses) of the current file that is not in the new render is classified:
 Invariant checked at run time: every segment of the current L0 and L1 is present in the new L0
 or L1 (whitespace-normalised), or nothing is written.
 
-`build --force` skips this analysis after copying the current L0 to
-`.MEMORY.md.bak-<UTC timestamp>` (the newest five are kept).
+`build --force` skips this analysis after copying the current L0 and L1 to
+`.MEMORY.md.bak-<UTC timestamp>` and `.<l1 name>.bak-<UTC timestamp>` (a `-1`, `-2` … suffix
+when the second repeats; the newest five per file are kept, and the backup just written is
+never pruned).
 
 ### 6.1 Folding pending lines
 
@@ -283,7 +290,7 @@ human summary (`--json`: one JSON object); stderr carries errors and warnings on
 | `check` | no | 0 in sync · 1 out of sync |
 | `lint` | no | 0 · 1 errors found |
 | `suggest [--transcripts N] [--apply]` | only with `--apply` | 0 · 1 |
-| `demote FILE` | yes | 0 |
+| `demote FILE` | yes | the following build's code · 2 unknown, invalid or generated name · 7 frontmatter that cannot be patched |
 | `migrate [--apply \| --restore TS]` | with `--apply` / `--restore` | 0 · 1 invariant failed |
 | `hook` | yes, only for an edit inside a store | always 0 |
 
@@ -309,7 +316,7 @@ an unrescuable edit, a concurrent edit), prints one JSON object:
 ```
 
 It always exits 0, including on internal errors (one line on stderr), so a bug in this tool can
-never block a session. Measured on Claude Code 2.1.299: `additionalContext` reaches Claude
+never block a session. `CC_MEMORY_INDEX_DISABLE=1` turns it off without uninstalling. Measured on Claude Code 2.1.299: `additionalContext` reaches Claude
 verbatim, while exit code 2 is presented to Claude as a "blocking error", which is why it is
 not used.
 
@@ -320,7 +327,11 @@ savings fit the budget. With `--transcripts N` it also counts how many of the N 
 transcripts of **the same project** (`*.jsonl` files directly in the store's parent directory,
 regular files only) mention each memory file, and ranks rarely used items first.
 
-Transcripts are streamed line by line and only memory file names matching
-`memory/<source name>` are extracted; no transcript text is kept, printed or logged. Claude
+Transcripts are streamed in 1 MiB chunks (with a 512-byte overlap, so a name split across a
+chunk boundary is counted once) and only memory file names matching `memory/<source name>`
+(either separator, including the escaped `\\` of Windows paths in JSON) are extracted; no
+transcript text is kept beyond the current chunk, printed or logged. A transcript that is
+skipped by a cap or grows while it is read is not counted at all. Resident items too long to
+ever fit L0 are proposed first. Claude
 Code documents the transcript format as internal and subject to change, so this is opt-in and
 best effort; nothing else depends on it.

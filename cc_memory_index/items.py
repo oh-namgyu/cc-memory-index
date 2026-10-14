@@ -11,12 +11,13 @@ An Item's origin says where its place in the output comes from:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from .safeio import SafeIOError, StoreDir
+from .safeio import Fingerprint, SafeIOError, StoreDir
 from .store import Source, _reject_duplicates, valid_source_name
 from .text import normalize_ws, sanitize
 
@@ -73,12 +74,12 @@ class PendingEntry:
     order: int
 
 
-def _read_object(sd: StoreDir, name: str) -> Optional[dict[str, object]]:
-    """Strict JSON object from a store data file, or None when the file is absent."""
+def _read_object(sd: StoreDir, name: str) -> tuple[Optional[dict[str, object]], Optional[Fingerprint]]:
+    """Strict JSON object from a store data file and its fingerprint; (None, None) when absent."""
     if sd.kind(name) == "missing":
-        return None
+        return None, None
     try:
-        data, _ = sd.read(name, DATA_MAX_BYTES)
+        data, fp = sd.read(name, DATA_MAX_BYTES)
         obj = json.loads(data.decode("utf-8-sig"), object_pairs_hook=_reject_duplicates)
     except SafeIOError as e:
         raise DataFileError(f"cannot read {name}: {e}") from e
@@ -86,7 +87,7 @@ def _read_object(sd: StoreDir, name: str) -> Optional[dict[str, object]]:
         raise DataFileError(f"{name} is not valid JSON: {e}") from e
     if not isinstance(obj, dict):
         raise DataFileError(f"{name} must contain a JSON object")
-    return obj
+    return obj, fp
 
 
 def _fields(obj: object, keys: tuple[str, ...], where: str) -> dict[str, object]:
@@ -126,11 +127,17 @@ def _entries(obj: dict[str, object], name: str, keys: tuple[str, ...], list_key:
     return entries
 
 
+def read_manual(sd: StoreDir) -> tuple[Manual, Optional[Fingerprint]]:
+    """The manual preamble and lines, and the file's fingerprint (None when absent: no lines)."""
+    obj, fp = _read_object(sd, MANUAL_NAME)
+    return (Manual(None, []) if obj is None else _manual(obj)), fp
+
+
 def load_manual(sd: StoreDir) -> Manual:
-    """The manual preamble and lines; an absent file means none."""
-    obj = _read_object(sd, MANUAL_NAME)
-    if obj is None:
-        return Manual(None, [])
+    return read_manual(sd)[0]
+
+
+def _manual(obj: dict[str, object]) -> Manual:
     lines: list[ManualLine] = []
     for i, raw in enumerate(_entries(obj, MANUAL_NAME, _MANUAL_KEYS, "lines")):
         where = f"{MANUAL_NAME} lines[{i}]"
@@ -147,11 +154,17 @@ def load_manual(sd: StoreDir) -> Manual:
     return Manual(preamble, lines)
 
 
+def read_pending(sd: StoreDir) -> tuple[list[PendingEntry], Optional[Fingerprint]]:
+    """Rescued lines waiting to be folded into frontmatter, and the file's fingerprint (None when absent)."""
+    obj, fp = _read_object(sd, PENDING_NAME)
+    return ([] if obj is None else _pending(obj)), fp
+
+
 def load_pending(sd: StoreDir) -> list[PendingEntry]:
-    """Rescued lines waiting to be folded into frontmatter; an absent file means none."""
-    obj = _read_object(sd, PENDING_NAME)
-    if obj is None:
-        return []
+    return read_pending(sd)[0]
+
+
+def _pending(obj: dict[str, object]) -> list[PendingEntry]:
     out: list[PendingEntry] = []
     for i, raw in enumerate(_entries(obj, PENDING_NAME, _PENDING_KEYS, "entries")):
         where = f"{PENDING_NAME} entries[{i}]"
@@ -169,11 +182,27 @@ def load_pending(sd: StoreDir) -> list[PendingEntry]:
     return out
 
 
+def _dump(obj: dict[str, object]) -> bytes:
+    return (json.dumps(obj, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def manual_bytes(manual: Manual) -> bytes:
+    """.index-manual.json holding manual; load_manual reads it back unchanged."""
+    lines = [dataclasses.asdict(line) for line in manual.lines]
+    return _dump({"version": DATA_VERSION, "preamble": manual.preamble, "lines": lines})
+
+
+def pending_bytes(entries: Sequence[PendingEntry]) -> bytes:
+    """.index-pending.json holding entries (an empty list is kept as a file)."""
+    return _dump({"version": DATA_VERSION, "entries": [dataclasses.asdict(entry) for entry in entries]})
+
+
 def _value(src: Source, key: str) -> str:
     return sanitize(src.fm.get(key) or "")
 
 
-def _default_idx(src: Source) -> str:
+def default_idx(src: Source) -> str:
+    """The line of a source without idx (DESIGN §3): [name or stem](file) — description."""
     name = _value(src, "name") or src.name[: -len(".md")]
     description = _value(src, "description")
     link = f"[{name}]({src.name})"
@@ -203,7 +232,7 @@ def _source_item(src: Source, pending: Optional[PendingEntry], problems: list[st
         return Item(src.name, sanitize(pending.idx), section, sanitize(pending.sub), pending.order, resident, "source")
     section = _value(src, "idx_section") or _type_section(src)
     order = _source_order(src, problems)
-    return Item(src.name, explicit or _default_idx(src), section, _value(src, "idx_sub"), order, resident, "source")
+    return Item(src.name, explicit or default_idx(src), section, _value(src, "idx_sub"), order, resident, "source")
 
 
 def _pending_item(entry: PendingEntry) -> Item:

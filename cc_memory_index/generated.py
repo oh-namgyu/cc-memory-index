@@ -1,4 +1,5 @@
-"""Bookkeeping for the generated files: render record, edit detection and L0 backups (DESIGN §6, §8)."""
+"""Bookkeeping for the generated files: render record, edit detection, stale L1 files and backups
+(DESIGN §6, §8)."""
 
 from __future__ import annotations
 
@@ -6,20 +7,21 @@ import hashlib
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
-from .safeio import Fingerprint, StoreDir
-from .store import L0_NAME, Source, _reject_duplicates
+from .safeio import Fingerprint, SafeIOError, StoreDir
+from .store import L0_NAME, Config, Source, _reject_duplicates, valid_source_name
 
 MIGRATING_MARK = ".index-migrating"
 RECORD_VERSION = 1
 RECORD_MAX_BYTES = 64 * 1024
 GENERATED_MAX_BYTES = 4 * 1024 * 1024
-BACKUP_PREFIX = f".{L0_NAME}.bak-"
+DEFAULT_L1_NAME = Config.l1_name
 BACKUPS_KEPT = 5
-_BACKUP_RE = re.compile(r"\A" + re.escape(BACKUP_PREFIX) + r"([0-9]{8}T[0-9]{6}Z)(?:-([0-9]{1,6}))?\Z")
+_STAMP = re.compile(r"([0-9]{8}T[0-9]{6}Z)(?:-([0-9]{1,6}))?\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_RECORD_KEYS = frozenset({"version", "l0", "l1", "l1_name", "stale"})
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,23 @@ class Current:
     name: str
     data: Optional[bytes]
     fp: Optional[Fingerprint]
+
+
+@dataclass(frozen=True)
+class Record:
+    """.index-render.json: hashes of L0 and L1 as last written, the L1 name they were written
+    under, and earlier L1 files (from before l1_name changed) still exactly as written."""
+
+    l0: str
+    l1: str
+    l1_name: str = DEFAULT_L1_NAME
+    stale: Mapping[str, str] = field(default_factory=dict)
+
+    def accepts(self, role: str, name: str, sha: str) -> bool:
+        """True when sha is content this tool wrote for that role."""
+        if role == "l0":
+            return sha == self.l0
+        return sha == self.l1 or self.stale.get(name) == sha
 
 
 def read_current(sd: StoreDir, name: str, max_bytes: int = GENERATED_MAX_BYTES) -> Current:
@@ -66,14 +85,25 @@ def has_content(data: Optional[bytes]) -> bool:
     return False
 
 
-def record_bytes(l0: str, l1: str) -> bytes:
-    """.index-render.json for the given L0 and L1 text."""
-    obj = {"version": RECORD_VERSION, "l0": sha256_text(l0), "l1": sha256_text(l1)}
+def record_bytes(l0: str, l1: str, l1_name: str = DEFAULT_L1_NAME, stale: Optional[Mapping[str, str]] = None) -> bytes:
+    """.index-render.json for the given L0 and L1 text; 'stale' is written only when there are any."""
+    obj: dict[str, object] = {"version": RECORD_VERSION, "l0": sha256_text(l0), "l1": sha256_text(l1),
+                              "l1_name": l1_name}
+    if stale:
+        obj["stale"] = dict(sorted(stale.items()))
     return (json.dumps(obj, indent=2) + "\n").encode("utf-8")
 
 
-def parse_record(current: Current) -> Optional[dict[str, str]]:
-    """{'l0': sha, 'l1': sha} from .index-render.json, or None when absent or malformed."""
+def _is_sha(value: object) -> bool:
+    return isinstance(value, str) and _SHA256.match(value) is not None
+
+
+def _is_l1_name(value: object) -> bool:
+    return isinstance(value, str) and valid_source_name(value) and value.lower() != L0_NAME.lower()
+
+
+def read_record(current: Current) -> Optional[Record]:
+    """The render record, or None when absent or malformed. A record without l1_name means the default."""
     text = as_text(current.data)
     if text is None:
         return None
@@ -81,66 +111,105 @@ def parse_record(current: Current) -> Optional[dict[str, str]]:
         obj = json.loads(text, object_pairs_hook=_reject_duplicates)
     except (ValueError, RecursionError):
         return None
-    if not isinstance(obj, dict) or set(obj) != {"version", "l0", "l1"}:
+    if not isinstance(obj, dict) or not {"version", "l0", "l1"} <= set(obj) <= _RECORD_KEYS:
         return None
     if type(obj["version"]) is not int or obj["version"] != RECORD_VERSION:
         return None
-    hashes = {role: obj[role] for role in ("l0", "l1")}
-    if not all(isinstance(h, str) and _SHA256.match(h) for h in hashes.values()):
+    l1_name, stale = obj.get("l1_name", DEFAULT_L1_NAME), obj.get("stale", {})
+    if not (_is_sha(obj["l0"]) and _is_sha(obj["l1"]) and _is_l1_name(l1_name) and isinstance(stale, dict)):
         return None
-    return hashes
+    if not all(_is_l1_name(name) and _is_sha(sha) for name, sha in stale.items()):
+        return None
+    return Record(obj["l0"], obj["l1"], l1_name, dict(stale))
 
 
-def needs_migration(l0: Current, record: Current, sources: Sequence[Source]) -> bool:
-    """DESIGN §8: a hand-written MEMORY.md, no render record and no source with a tier."""
-    if record.data is not None or not has_content(l0.data):
+def parse_record(current: Current) -> Optional[dict[str, str]]:
+    """{'l0': sha, 'l1': sha, 'l1_name': name} from .index-render.json, or None when absent or malformed."""
+    record = read_record(current)
+    return None if record is None else {"l0": record.l0, "l1": record.l1, "l1_name": record.l1_name}
+
+
+def needs_migration(l0: Current, record: Current, sources: Sequence[Source], has_manual: bool) -> bool:
+    """DESIGN §8: a hand-written MEMORY.md, no render record, no manual-lines file (migrating an
+    index that links no memory file writes only that) and no source with a tier."""
+    if record.data is not None or has_manual or not has_content(l0.data):
         return False
     return not any(src.fm.get("tier") is not None for src in sources)
 
 
 def edited_generated_files(
-    record: Optional[Mapping[str, str]], current: Mapping[str, Current], fresh: Mapping[str, str]
+    record: Optional[Record], current: Mapping[str, Current], fresh: Mapping[str, str]
 ) -> list[str]:
-    """Names of generated files whose current content writing the fresh render would lose.
+    """Roles ('l0', 'l1') of the generated files whose current content writing the fresh render would lose.
 
-    current and fresh are keyed by role ('l0', 'l1'). A file is not edited when it is absent,
-    has no content beyond titles, equals the fresh render (an interrupted build converges), or
-    matches the hash this tool recorded when it last wrote it. CRLF is normalised first.
+    current and fresh are keyed by role. A file is not edited when it is absent, has no content
+    beyond titles, equals the fresh render (an interrupted build converges), or matches what this
+    tool recorded when it last wrote it. CRLF is normalised first.
     """
     edited: list[str] = []
     for role, cur in current.items():
         if not has_content(cur.data):
             continue
         text = as_text(cur.data)
-        if text is not None and (text == fresh[role] or (record is not None and sha256_text(text) == record[role])):
+        if text is not None and (
+            text == fresh[role] or (record is not None and record.accepts(role, cur.name, sha256_text(text)))
+        ):
             continue
-        edited.append(cur.name)
+        edited.append(role)
     return edited
 
 
-def _backup_key(name: str) -> Optional[tuple[str, int]]:
-    m = _BACKUP_RE.match(name)
+def stale_generated(sd: StoreDir, record: Optional[Record], l1_name: str) -> dict[str, str]:
+    """Earlier L1 files, written under another l1_name and unchanged since: name -> SHA-256.
+
+    They are not memory files and stay out of the scan until deleted; one that was edited since
+    is an ordinary source again.
+    """
+    if record is None:
+        return {}
+    candidates = {**record.stale, record.l1_name: record.l1}
+    found: dict[str, str] = {}
+    for name, sha in sorted(candidates.items()):
+        if name.lower() in (l1_name.lower(), L0_NAME.lower()) or sd.kind(name) != "file":
+            continue
+        try:
+            text = as_text(read_current(sd, name).data)
+        except (SafeIOError, OSError):
+            continue
+        if text is not None and sha256_text(text) == sha:
+            found[name] = sha
+    return found
+
+
+def backup_prefix(name: str) -> str:
+    return f".{name}.bak-"
+
+
+def _backup_key(prefix: str, name: str) -> Optional[tuple[str, int]]:
+    m = _STAMP.match(name[len(prefix):]) if name.startswith(prefix) else None
     return (m.group(1), int(m.group(2) or 0)) if m else None
 
 
-def backup_l0(sd: StoreDir, data: bytes, now: Optional[float] = None) -> str:
-    """Copy L0 to .MEMORY.md.bak-<UTC timestamp> and keep the newest BACKUPS_KEPT backups.
+def backup_generated(sd: StoreDir, name: str, data: bytes, now: Optional[float] = None) -> str:
+    """Copy a generated file to .<name>.bak-<UTC timestamp> and keep its newest BACKUPS_KEPT backups.
 
     Within one second the suffix continues after the highest one present, and the backup just
     written is never pruned, even when the clock has stepped back behind older backups.
     """
+    prefix = backup_prefix(name)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
-    same_second = [key[1] for key in map(_backup_key, sd.names()) if key is not None and key[0] == stamp]
-    name = BACKUP_PREFIX + stamp + (f"-{max(same_second) + 1}" if same_second else "")
-    sd.replace(name, data, None)
-    _prune_backups(sd, name)
-    return name
+    keys = [_backup_key(prefix, n) for n in sd.names()]
+    same_second = [key[1] for key in keys if key is not None and key[0] == stamp]
+    backup = prefix + stamp + (f"-{max(same_second) + 1}" if same_second else "")
+    sd.replace(backup, data, None)
+    _prune_backups(sd, prefix, backup)
+    return backup
 
 
-def _prune_backups(sd: StoreDir, keep: str) -> None:
+def _prune_backups(sd: StoreDir, prefix: str, keep: str) -> None:
     keyed: list[tuple[tuple[str, int], str]] = []
     for name in sd.names():
-        key = _backup_key(name)
+        key = _backup_key(prefix, name)
         if key is not None and name != keep:
             keyed.append((key, name))
     for _, name in sorted(keyed)[: max(0, len(keyed) - (BACKUPS_KEPT - 1))]:

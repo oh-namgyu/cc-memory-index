@@ -1,0 +1,69 @@
+# Security
+
+## What this tool does
+
+cc-memory-index reads and writes files in one directory: a Claude Code auto-memory store. It
+makes no network requests, starts no processes, and never evaluates anything it reads. A CI gate
+(`scripts/check_forbidden.py`) fails the build if network, process or dynamic-code APIs appear
+in the package.
+
+The Claude Code hook acts only on a store that already contains `.index-render.json`, which
+this tool writes the first time you run `build` or `migrate --apply` there. Installing the
+plugin changes nothing until you opt a store in. `CC_MEMORY_INDEX_DISABLE=1` turns the hook off.
+
+## Trust model
+
+Memory files are written by Claude, and Claude reads web pages and documents that can try to
+steer it. Everything in a memory file is therefore treated as **untrusted data**:
+
+* Frontmatter is read by a strict subset parser. There is no YAML loader, `eval` or `pickle`.
+* Text that becomes an index line is reduced to a single line (line breaks, NEL, U+2028/U+2029
+  and control characters removed) before it is written anywhere, so it cannot add headings,
+  close a frontmatter block or add keys.
+* Link targets taken from index text must be plain file names in the store. A path such as
+  `../../.ssh/id_rsa.md` is ignored and reported, never opened.
+* Nothing is truncated: text that is too long for `MEMORY.md` is listed in the on-demand index
+  instead. The tool moves content; it never amplifies it.
+
+**Not covered:** this tool does not judge whether a memory's *meaning* is malicious (for
+example, an instruction planted through prompt injection). It keeps such text where it was put;
+reviewing what Claude remembers is still up to you (`/memory` in Claude Code).
+
+## Links, races and crashes
+
+* Symlinks and Windows name-surrogate reparse points (junctions) inside the store are never read
+  or written; files with more than one hard link are never written. The store directory itself
+  may be a symlink, for example into a synced folder.
+* On Linux and macOS every operation goes through one directory descriptor, so renaming or
+  replacing the store path during a run cannot redirect a write. Windows has no equivalent API;
+  there the directory's identity is checked again before every write, which narrows the window
+  but does not close it.
+* Every write replaces one file atomically (temporary file, `fsync`, rename). Writes are ordered
+  so that stopping between any two leaves a valid store, and running the command again finishes
+  the job. There is no rollback that could put old content over a newer edit.
+* Claude Code's own Write and Edit tools do not take this tool's lock. Each file is fingerprinted
+  when read and checked again immediately before it is replaced; if it changed, it is left alone
+  and the command asks to be rerun. A concurrent edit that lands in the instant between that
+  final check and the rename can still be overwritten. Within one session the hook runs after
+  the tool call has finished, so the hook does not race its own session.
+* A malicious process running as your own user already has the same access as this tool and is
+  out of scope.
+
+## Transcripts
+
+Only `suggest --transcripts N` reads session transcripts, and only when you pass that flag. It
+reads the N most recent `*.jsonl` files of the same project (symlinks ignored, size-capped),
+extracts memory file names and keeps a count per file. No transcript text is stored, printed or
+logged. Claude Code documents the transcript format as internal, so this ranking is best effort.
+
+## Supply chain
+
+The package has no runtime dependencies. CI uses GitHub Actions pinned to full commit SHAs with
+read-only permissions, and Dependabot proposes updates to them.
+
+## Reporting a vulnerability
+
+Please report vulnerabilities privately through GitHub's
+[private vulnerability reporting](https://github.com/oh-namgyu/cc-memory-index/security/advisories/new)
+rather than in a public issue. Include the version, your OS and Python version, and the smallest
+store or hook payload that reproduces the problem. You should get a reply within a week.

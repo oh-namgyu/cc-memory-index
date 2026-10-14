@@ -1,4 +1,4 @@
-"""Platform primitives under safeio: open flags, entry kinds, draining, advisory locks."""
+"""Platform primitives under safeio: open flags, entry kinds, streaming reads, advisory locks."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 import stat
 import sys
 import time
-from typing import Optional
+from typing import Iterable, Iterator
 
 if sys.platform == "win32":
     import msvcrt
@@ -16,6 +16,7 @@ else:
     import fcntl
 
 CHUNK = 1 << 20
+NO_LIMIT = sys.maxsize
 POLL_S = 0.05
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 NONBLOCK = getattr(os, "O_NONBLOCK", 0)
@@ -63,23 +64,28 @@ def write_all(fd: int, data: bytes) -> None:
         view = view[os.write(fd, view):]
 
 
-def drain(fd: int, limit: Optional[int], keep: bool) -> tuple[bytes, int, str]:
-    """Read to EOF, or up to limit + 1 bytes so the caller can tell the file was too large.
-
-    Returns (data if keep else b"", size, sha256 hex).
-    """
-    digest = hashlib.sha256()
-    chunks: list[bytes] = []
+def stream(fd: int, chunk: int, limit: int) -> Iterator[bytes]:
+    """Yield pieces of at most chunk bytes until EOF, or until limit + 1 bytes were read so the
+    caller can tell the file was too large without reading the rest of it."""
+    if chunk < 1 or limit < 0:
+        raise ValueError("chunk must be positive and limit must not be negative")
     size = 0
-    while limit is None or size <= limit:
-        chunk = os.read(fd, CHUNK if limit is None else min(CHUNK, limit + 1 - size))
-        if not chunk:
-            break
-        digest.update(chunk)
-        size += len(chunk)
-        if keep:
-            chunks.append(chunk)
-    return b"".join(chunks), size, digest.hexdigest()
+    while size <= limit:
+        piece = os.read(fd, min(chunk, limit + 1 - size))
+        if not piece:
+            return
+        size += len(piece)
+        yield piece
+
+
+def digest(pieces: Iterable[bytes]) -> tuple[int, str]:
+    """Total size and SHA-256 hex of a stream of pieces."""
+    h = hashlib.sha256()
+    size = 0
+    for piece in pieces:
+        h.update(piece)
+        size += len(piece)
+    return size, h.hexdigest()
 
 
 def try_lock(fd: int) -> bool:
