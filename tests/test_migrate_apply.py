@@ -13,8 +13,8 @@ from cc_memory_index import migrate as migrate_mod
 from cc_memory_index.build import run_build
 from cc_memory_index.frontmatter import parse
 from cc_memory_index.migrate import run_migrate
-from cc_memory_index.migrate_plan import render_store
 from cc_memory_index.migrate_snapshot import SNAPSHOT_PREFIX, new_snapshot_id
+from cc_memory_index.plan import render_store
 from cc_memory_index.safeio import StoreDir
 
 L0, MIGRATING, RECORD = "MEMORY.md", ".index-migrating", ".index-render.json"
@@ -105,8 +105,8 @@ def test_concurrent_edit_stops_and_a_rerun_snapshots_the_edit(tmp_path: Path, mo
 def test_failed_check_keeps_the_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = hand_store(tmp_path)
     def lossy(*args: Any) -> Any:
-        out = render_store(*args)
-        return dataclasses.replace(out, l0=out.l0.replace("free text", "something else"))
+        items, out = render_store(*args)
+        return items, dataclasses.replace(out, l0=out.l0.replace("free text", "something else"))
 
     with monkeypatch.context() as m:
         m.setattr(migrate_mod, "render_store", lossy)

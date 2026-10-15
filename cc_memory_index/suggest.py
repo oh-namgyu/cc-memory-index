@@ -7,16 +7,17 @@ store is built.
 from __future__ import annotations
 
 import dataclasses
-from typing import Optional, Sequence
+from typing import AbstractSet, Optional, Sequence
 
-from .build import EXIT_OK, EXIT_OUT_OF_SYNC, EXIT_OVERFLOW, EXIT_USAGE, BuildResult, outcome, run_build, swept
+from .build import run_build
 from .demote import INDEXED, demote_files
 from .items import Item
 from .plan import prepare
-from .render import Rendered, fill, head_lines, item_bytes, nbytes, render
+from .render import Rendered, fill, head_lines, item_bytes, nbytes, render, tiers
+from .result import EXIT_ATTENTION, EXIT_OK, EXIT_USAGE, BuildResult, outcome, swept
 from .safeio import StoreDir
 from .store import L0_NAME, Config, load_config
-from .transcripts import MAX_TRANSCRIPTS, count_mentions
+from .transcripts import MAX_TRANSCRIPTS, MIN_TRANSCRIPTS, check_count, count_mentions
 
 
 @dataclasses.dataclass(frozen=True)
@@ -25,6 +26,11 @@ class Candidate:
     bytes: int
     mentions: Optional[int]
     oversized: bool
+
+
+def _among(it: Item, files: AbstractSet[str]) -> bool:
+    """True for the item of a memory file in files."""
+    return it.origin == "source" and it.file in files
 
 
 @dataclasses.dataclass(frozen=True)
@@ -36,7 +42,7 @@ class _Budget:
     cfg: Config
 
     def fits(self, demoted: set[str]) -> bool:
-        keep = [it for it in self.resident if not (it.origin == "source" and it.file in demoted)]
+        keep = [it for it in self.resident if not _among(it, demoted)]
         return not fill(self.head, keep, self.cfg).overflow
 
 
@@ -76,17 +82,17 @@ def _describe(c: Candidate, transcripts: Optional[int]) -> str:
 
 def _verify(items: Sequence[Item], preamble: Optional[str], cfg: Config, chosen: set[str]) -> Rendered:
     """Render again with the chosen memories demoted, in memory only."""
-    demoted = [dataclasses.replace(it, resident=False) if it.origin == "source" and it.file in chosen else it
-               for it in items]
+    demoted = [dataclasses.replace(it, resident=False) if _among(it, chosen) else it for it in items]
     return render(demoted, preamble, cfg)
 
 
 def _propose(store_path: str, items: list[Item], preamble: Optional[str], cfg: Config,
              transcripts: Optional[int], res: BuildResult) -> list[Candidate]:
-    resident = [it for it in items if it.resident and it.origin != "pending"]
+    resident = tiers(items).resident
     budget = _Budget(head_lines(preamble, cfg.l1_name), resident, cfg)
     overflow = fill(budget.head, resident, cfg).overflow
-    res.stats.update(resident=len(resident), overflow=len(overflow), transcripts=transcripts, proposal=[])
+    res.stats.update({"resident": len(resident), "overflow": len(overflow), "transcripts": transcripts,
+                      "proposal": []})
     if not overflow:
         res.messages.append(f"within budget: every resident entry fits {L0_NAME}; nothing to demote")
         return []
@@ -98,13 +104,13 @@ def _propose(store_path: str, items: list[Item], preamble: Optional[str], cfg: C
     k = _shortest_fit(budget, ranked)
     rendered = None if k is None else _verify(items, preamble, cfg, {c.file for c in ranked[:k]})
     if k is None or rendered is None or rendered.overflow:
-        res.code = EXIT_OVERFLOW
+        res.code = EXIT_ATTENTION
         res.messages.append(f"{len(overflow)} entries overflow {L0_NAME} and demoting every resident memory"
                             " would not fix it: shorten the manual lines in .index-manual.json")
         return []
     chosen = list(ranked[:k])
-    res.stats.update(proposal=[dataclasses.asdict(c) for c in chosen], l0_bytes_after=nbytes(rendered.l0),
-                     l0_lines_after=rendered.l0.count("\n"))
+    res.stats.update({"proposal": [dataclasses.asdict(c) for c in chosen], "l0_bytes_after": nbytes(rendered.l0),
+                      "l0_lines_after": rendered.l0.count("\n")})
     res.messages.append(f"{len(overflow)} resident entries do not fit {L0_NAME}; demoting these {k} memories"
                         f" (tier: {INDEXED}) makes every other resident entry fit:")
     res.messages += [_describe(c, transcripts) for c in chosen]
@@ -131,14 +137,15 @@ def _apply(store_path: str, chosen: Sequence[Candidate], res: BuildResult) -> No
 def run_suggest(store_path: str, transcripts: Optional[int] = None, apply: bool = False) -> BuildResult:
     """Propose resident memories to demote so L0 fits its budget; apply=True demotes them and builds."""
     res = BuildResult(EXIT_OK)
-    if transcripts is not None and (isinstance(transcripts, bool) or not 1 <= transcripts <= MAX_TRANSCRIPTS):
-        res.code = EXIT_USAGE
-        res.messages.append(f"--transcripts must be between 1 and {MAX_TRANSCRIPTS}")
-        return res
+    if transcripts is not None:
+        try:
+            check_count(transcripts)
+        except ValueError:
+            return BuildResult(EXIT_USAGE, [f"--transcripts must be between {MIN_TRANSCRIPTS} and {MAX_TRANSCRIPTS}"])
     chosen: list[Candidate] = []
     with outcome(res), StoreDir(store_path) as sd:
         cfg = load_config(sd)
-        plan = prepare(sd, cfg, EXIT_USAGE if apply else EXIT_OUT_OF_SYNC, {}, [])
+        plan = prepare(sd, cfg, EXIT_USAGE if apply else EXIT_ATTENTION, {}, [])
         chosen = _propose(store_path, plan.items, plan.inputs.data.manual.preamble, cfg, transcripts, res)
     if res.code != EXIT_OK:
         return res

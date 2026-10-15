@@ -14,11 +14,12 @@ from typing import Iterator, Optional
 from . import fsprim
 from .fsprim import BINARY, NOFOLLOW, NONBLOCK, kind_of
 from .safetypes import (
-    ANY, ConcurrentEdit, Expect, Fingerprint, LockTimeout, RootChanged, SafeIOError, TooLarge, UnsafeEntry,
+    ANY, ConcurrentEdit, EntryKind, Expect, Fingerprint, Kind, LockTimeout, RootChanged, SafeIOError, TooLarge,
+    UnsafeEntry, is_sha256,
 )
 
-__all__ = ["ANY", "LOCK_NAME", "TEMP_MIN_AGE_NS", "TEMP_NAME", "ConcurrentEdit", "Expect", "Fingerprint", "LockTimeout",
-           "RootChanged", "SafeIOError", "StoreDir", "TooLarge", "UnsafeEntry"]
+__all__ = ["ANY", "LOCK_NAME", "TEMP_MIN_AGE_NS", "TEMP_NAME", "ConcurrentEdit", "EntryKind", "Expect", "Fingerprint",
+           "Kind", "LockTimeout", "RootChanged", "SafeIOError", "StoreDir", "TooLarge", "UnsafeEntry", "is_sha256"]
 LOCK_NAME = ".index.lock"
 TEMP_NAME = re.compile(r"\.(.+)\.tmp-[0-9a-f]{16}\Z")
 TEMP_MIN_AGE_NS = 10 * 60 * 10**9
@@ -124,7 +125,7 @@ class StoreDir:
         self._check_root()
         return sorted(os.listdir(self.path if self._fd is None else self._fd))
 
-    def kind(self, name: str) -> str:
+    def kind(self, name: str) -> Kind:
         """One of 'file', 'link', 'dir', 'other', 'missing'; links are never followed."""
         try:
             return kind_of(self._lstat(name))
@@ -134,14 +135,14 @@ class StoreDir:
     def nlink(self, name: str) -> int:
         return self._lstat(name).st_nlink
 
-    def entry_stat(self, name: str) -> tuple[str, int, int]:
+    def entry_stat(self, name: str) -> tuple[EntryKind, int, int]:
         """(kind, size, mtime_ns) of an entry from one lstat; links are never followed."""
         st = self._lstat(name)
         return kind_of(st), st.st_size, st.st_mtime_ns
 
     def read(self, name: str, max_bytes: int = 4 * 1024 * 1024) -> tuple[bytes, Fingerprint]:
         data = b"".join(self.iter_chunks(name, fsprim.CHUNK, max_bytes))
-        return data, Fingerprint(*fsprim.digest([data]))
+        return data, Fingerprint.of(data)
 
     def iter_chunks(self, name: str, chunk: int, max_bytes: int) -> Iterator[bytes]:
         """Stream an entry with read's refusals; TooLarge once more than max_bytes were read."""
@@ -158,7 +159,7 @@ class StoreDir:
 
     def fingerprint(self, name: str) -> Optional[Fingerprint]:
         try:
-            return Fingerprint(*fsprim.digest(self.iter_chunks(name, fsprim.CHUNK, fsprim.NO_LIMIT)))
+            return Fingerprint.of_pieces(self.iter_chunks(name, fsprim.CHUNK, fsprim.NO_LIMIT))
         except FileNotFoundError:
             return None
 
@@ -208,7 +209,7 @@ class StoreDir:
             self._discard(tmp)
             raise
         self._sync_dir()
-        return Fingerprint(*fsprim.digest([data]))
+        return Fingerprint.of(data)
 
     def remove(self, name: str, expect: Expect) -> None:
         _check_expect(expect)

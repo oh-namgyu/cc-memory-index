@@ -4,14 +4,17 @@
 A link is `[text](target)` on one line: the text holds no brackets, and the target is non-empty,
 holds no whitespace, brackets, parentheses or angle brackets, and may be wrapped in `<` `>`. A
 `#fragment` is not part of the file name, so `[N](n.md#top)` links to n.md. A target with a URL
-scheme (`https:`, `mailto:` ...) is never a memory file. Neither the text nor the target can contain
-`[`, so every character is scanned by at most one attempt and the match time is linear, and each
-line is read up to LINE_MAX_CHARS only.
+scheme (`https:`, `mailto:` ...) is never a memory file, and nothing inside an inline code span is a
+link (markdown.blank_code). Neither the text nor the target can contain `[`, so every character is
+scanned by at most one attempt and the match time is linear, and each line is read up to
+LINE_MAX_CHARS only.
 """
 
 from __future__ import annotations
 
 import re
+
+from .markdown import blank_code
 
 LINE_MAX_CHARS = 64 * 1024
 _LINK = re.compile(r"\[[^\[\]\n]*\]\((?:<([^<>()\[\]\s]+)>|([^<>()\[\]\s]+))\)")
@@ -32,7 +35,7 @@ def memory_links(text: str) -> list[str]:
     """
     found: list[str] = []
     for line in text.split("\n"):
-        for m in _LINK.finditer(line, 0, LINE_MAX_CHARS):
+        for m in _LINK.finditer(blank_code(line[:LINE_MAX_CHARS])):
             target = _target(m.group(1) or m.group(2))
             if target.endswith(_SUFFIX) and not _SCHEME.match(target):
                 found.append(target)

@@ -17,7 +17,7 @@ from cc_memory_index.render import (
     render,
 )
 from cc_memory_index.rescue import Context, Edited, analyse, default_pieces, lost
-from cc_memory_index.segments import BodyLine, Seg, body_lines, l1_heading, l1_section, pieces, split_head
+from cc_memory_index.segments import BodyLine, BodySegment, body_lines, l1_heading, l1_section, pieces, split_head
 from cc_memory_index.store import Config, Source
 
 L1 = "index-l1.md"
@@ -35,7 +35,7 @@ def test_l1_own_headings_have_no_section() -> None:
     assert l1_section("Overflow") is None and l1_section("UNRESOLVED") is None
 
 
-def _segments(lines: list[str], l1: bool) -> list[Seg]:
+def _segments(lines: list[str], l1: bool) -> list[BodySegment]:
     return [seg for line in body_lines(lines, l1) for seg in line.segments()]
 
 
@@ -46,12 +46,12 @@ def test_body_lines_and_segments() -> None:
                                             BodyLine("a1 · [b](b.md) · c", "A", "", True),
                                             BodyLine("nested", "A", "Sub", True)]
     assert _segments(lines, False) == [
-        Seg("free line", "", ""), Seg("a1", "A", ""), Seg("[b](b.md)", "A", ""), Seg("c", "A", ""),
-        Seg("nested", "A", "Sub"), Seg("#### deep", "A", "Sub"), Seg("spilled", "Overflow", ""),
-        Seg("[x · y](x.md)", "B", ""), Seg("z", "B", ""), Seg("plain · text", "B", ""),
+        BodySegment("free line", "", ""), BodySegment("a1", "A", ""), BodySegment("[b](b.md)", "A", ""), BodySegment("c", "A", ""),
+        BodySegment("nested", "A", "Sub"), BodySegment("#### deep", "A", "Sub"), BodySegment("spilled", "Overflow", ""),
+        BodySegment("[x · y](x.md)", "B", ""), BodySegment("z", "B", ""), BodySegment("plain · text", "B", ""),
     ]
     assert _segments(["## Overflow", "### s", "- spilled", "## Overflow (section)", "- mine"], True) == [
-        Seg("spilled", "", "s"), Seg("mine", "Overflow", "")]
+        BodySegment("spilled", "", "s"), BodySegment("mine", "Overflow", "")]
 
 
 def test_pieces_sanitise_before_splitting() -> None:

@@ -4,7 +4,8 @@ from pathlib import Path
 
 from storekit import built_store, write_json, write_memory
 
-from cc_memory_index.build import EXIT_USAGE, run_build
+from cc_memory_index.build import run_build
+from cc_memory_index.result import EXIT_USAGE
 
 
 def test_l1_name_cannot_point_at_a_memory(tmp_path: Path) -> None:

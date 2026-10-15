@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence
 
-from .fold import DataFiles
 from .generated import (
     MIGRATING_MARK,
     RECORD_MAX_BYTES,
@@ -18,21 +17,11 @@ from .generated import (
     read_record,
     stale_generated,
 )
-from .items import Item, Manual, items_from_sources, manual_items, read_manual, read_pending
-from .render import Rendered, RenderInvariant, nbytes, reachable, render
+from .items import DataFiles, Item, Manual, PendingEntry, items_from_sources, manual_items, read_manual, read_pending
+from .render import Rendered, RenderInvariant, reachable, render, tiers
+from .result import EXIT_USAGE, Refusal, Stats, budget_stats
 from .safeio import StoreDir
-from .store import L0_NAME, RENDER_MARK, Config, ScanResult, scan, valid_source_name
-
-
-USAGE_ERROR = 2  # exit code of a usage or configuration error; build re-exports it as EXIT_USAGE
-
-
-class Refusal(Exception):
-    """A command declines to go on; nothing has been written."""
-
-    def __init__(self, code: int, message: str) -> None:
-        super().__init__(message)
-        self.code = code
+from .store import L0_NAME, RENDER_MARK, Config, ScanResult, Source, scan, valid_source_name
 
 
 @dataclass
@@ -79,25 +68,23 @@ def _uncovered(scanned: ScanResult, manual: Manual, items: Sequence[Item]) -> li
     return missing
 
 
-def _stats(cfg: Config, inputs: Inputs, items: Sequence[Item], rendered: Rendered) -> dict[str, Any]:
-    resident = sum(1 for it in items if it.resident and it.origin != "pending")
-    return {
+def _stats(cfg: Config, inputs: Inputs, items: Sequence[Item], rendered: Rendered) -> Stats:
+    placed = tiers(items)
+    budget = budget_stats(rendered, cfg)
+    stats: Stats = {
         "sources": len(inputs.scanned.sources),
         "skipped": len(inputs.scanned.skipped),
         "manual": len(inputs.data.manual.lines),
         "pending": len(inputs.data.pending),
-        "resident": resident,
-        "l0_items": resident - len(rendered.overflow),
-        "l1_items": sum(1 for it in items if not it.resident and it.origin != "pending"),
-        "overflow": len(rendered.overflow),
+        "resident": len(placed.resident),
+        "l0_items": len(placed.resident) - budget["overflow"],
+        "l1_items": len(placed.listed),
+        "overflow": budget["overflow"],
         "oversized": len(rendered.oversized),
         "unresolved": len(rendered.unresolved),
-        "l0_bytes": nbytes(rendered.l0),
-        "l0_lines": rendered.l0.count("\n"),
-        "budget_bytes": cfg.budget_bytes,
-        "budget_lines": cfg.budget_lines,
-        "l1_name": cfg.l1_name,
     }
+    stats.update(budget)
+    return stats
 
 
 def _read_inputs(sd: StoreDir, cfg: Config, record: Optional[Record], notes: list[str]) -> Inputs:
@@ -109,10 +96,16 @@ def _read_inputs(sd: StoreDir, cfg: Config, record: Optional[Record], notes: lis
     return Inputs(scanned, DataFiles(manual, manual_fp, pending, pending_fp), stale)
 
 
-def _render(inputs: Inputs, cfg: Config, stats: dict[str, Any], notes: list[str]) -> tuple[list[Item], Rendered]:
+def render_store(sources: Sequence[Source], manual: Manual, pending: Sequence[PendingEntry], cfg: Config,
+                 notes: Optional[list[str]] = None) -> tuple[list[Item], Rendered]:
+    """The items of a store and their L0 and L1, in memory only; item problems are appended to notes."""
+    items = items_from_sources(sources, pending, notes) + manual_items(manual)
+    return items, render(items, manual.preamble, cfg)
+
+
+def _render(inputs: Inputs, cfg: Config, stats: Stats, notes: list[str]) -> tuple[list[Item], Rendered]:
     data = inputs.data
-    items = items_from_sources(inputs.scanned.sources, data.pending, notes) + manual_items(data.manual)
-    rendered = render(items, data.manual.preamble, cfg)
+    items, rendered = render_store(inputs.scanned.sources, data.manual, data.pending, cfg, notes)
     stats.update(_stats(cfg, inputs, items, rendered))
     missing = reachable(items, rendered, data.pending) + _uncovered(inputs.scanned, data.manual, items)
     if missing:
@@ -125,7 +118,7 @@ def refuse_if_migrating(sd: StoreDir, code: int) -> None:
         raise Refusal(code, f"{MIGRATING_MARK} exists: a migration was interrupted; run `migrate --apply` again")
 
 
-def prepare(sd: StoreDir, cfg: Config, refuse: int, stats: dict[str, Any], notes: list[str],
+def prepare(sd: StoreDir, cfg: Config, refuse: int, stats: Stats, notes: list[str],
             migrating: bool = False) -> Plan:
     """Read the store and render it, writing nothing; the caller decides whether to hold the lock.
 
@@ -152,10 +145,10 @@ def refuse_foreign_l1(l1: Current, record: Optional[Record], l1_name: str) -> No
     if l1.data is None or (record is not None and record.l1_name == l1_name):
         return
     if not is_l1_text(l1.data.decode("utf-8", "replace"), l1_name):
-        raise Refusal(USAGE_ERROR, f"l1_name names {l1_name}, which this tool did not generate: choose another name")
+        raise Refusal(EXIT_USAGE, f"l1_name names {l1_name}, which this tool did not generate: choose another name")
 
 
-def rerender(sd: StoreDir, cfg: Config, plan: Plan, stats: dict[str, Any], notes: list[str]) -> Plan:
+def rerender(sd: StoreDir, cfg: Config, plan: Plan, stats: Stats, notes: list[str]) -> Plan:
     """Re-read sources and data files after the rescue wrote them and render again (DESIGN §6.1 step 4)."""
     inputs = _read_inputs(sd, cfg, plan.parsed, notes)
     skipped = skip_notes(inputs.scanned)

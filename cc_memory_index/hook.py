@@ -13,10 +13,13 @@ import contextlib
 import json
 import os
 import sys
-from typing import IO, Any, Mapping, Optional
+from typing import IO, Mapping, Optional
 
-from .build import EXIT_CONCURRENT, EXIT_EDITED, EXIT_IO, EXIT_LOCK, EXIT_OK, EXIT_OVERFLOW, EXIT_PARSE
-from .build import EXIT_INVARIANT, EXIT_USAGE, BuildResult, run_build
+from .build import run_build
+from .result import (
+    EXIT_ATTENTION, EXIT_CONCURRENT, EXIT_INVARIANT, EXIT_IO, EXIT_LOCK, EXIT_OK, EXIT_PARSE, EXIT_UNRESCUABLE,
+    EXIT_USAGE, BuildResult, Stats,
+)
 from .store import store_root_for_edit, valid_source_name
 
 MAX_INPUT_BYTES = 1 << 20
@@ -51,11 +54,11 @@ def target_store(raw: bytes) -> Optional[str]:
     return store_root_for_edit(file_path) if isinstance(file_path, str) else None
 
 
-def _count(value: Any) -> int:
+def _count(value: object) -> int:
     return len(value) if isinstance(value, list) else 0
 
 
-def _rescued(stats: Mapping[str, Any]) -> Optional[str]:
+def _rescued(stats: Stats) -> Optional[str]:
     entries = stats.get("rescued")
     files = [e.get("file") for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
     names: list[str] = [name for name in files if isinstance(name, str) and valid_source_name(name)]
@@ -71,16 +74,16 @@ def _rescued(stats: Mapping[str, Any]) -> Optional[str]:
     )
 
 
-def _outcome(code: int, stats: Mapping[str, Any]) -> Optional[str]:
+def _outcome(code: int, stats: Stats) -> Optional[str]:
     """One fixed sentence for the build's exit code (DESIGN §10), or None when there is nothing to say."""
     if code in (EXIT_OK, EXIT_LOCK):
         return None
-    if code == EXIT_OVERFLOW:
+    if code == EXIT_ATTENTION:  # build exits 1 only for an overflow
         overflow = stats.get("overflow")
         count = f"{overflow} resident entries" if isinstance(overflow, int) else "Some resident entries"
         return (f"{count} no longer fit the MEMORY.md budget and are listed in the on-demand index instead."
                 " Run `cc-memory-index suggest` to choose memories to demote.")
-    if code == EXIT_EDITED:
+    if code == EXIT_UNRESCUABLE:
         return (
             f"Your edit to the generated index was not applied: {_count(stats.get('unrescuable'))} added line(s)"
             " could not be kept. A line added by hand is kept only when it links to exactly one existing memory"
@@ -97,7 +100,7 @@ def _outcome(code: int, stats: Mapping[str, Any]) -> Optional[str]:
 
 def describe(result: BuildResult) -> Optional[str]:
     """What Claude should know about this rebuild, or None when there is nothing to say."""
-    stats: Mapping[str, Any] = result.stats or {}
+    stats: Stats = result.stats or {}
     manual = _count(stats.get("manual_added"))
     parts = [
         _rescued(stats),
@@ -147,8 +150,8 @@ def main(
         context = _context(stdin or sys.stdin.buffer, os.environ if env is None else env)
     except Exception as e:  # noqa: BLE001 - the hook must never fail a tool call
         _send(stderr or sys.stderr, f"cc-memory-index hook: {type(e).__name__}: {str(e)[:200]}\n")
-        return 0
+        return EXIT_OK
     if context:
         output = {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": context}}
         _send(stdout or sys.stdout, json.dumps(output) + "\n")
-    return 0
+    return EXIT_OK

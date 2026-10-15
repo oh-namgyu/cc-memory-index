@@ -18,13 +18,14 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Sequence, TextIO
 
 from . import __version__, hook, migrate
-from .build import EXIT_OK, EXIT_OVERFLOW, EXIT_USAGE, BuildResult, run_build, run_check
+from .build import run_build, run_check
 from .demote import run_demote
 from .lint import run_lint
 from .migrate_snapshot import SNAPSHOT_PREFIX
+from .result import EXIT_ATTENTION, EXIT_OK, EXIT_USAGE, BuildResult, budget_line
 from .store import ENV_STORE, L0_NAME, StoreNotFound, discover
 from .suggest import run_suggest
-from .transcripts import MAX_TRANSCRIPTS
+from .transcripts import MAX_TRANSCRIPTS, MIN_TRANSCRIPTS, check_count
 
 
 def _stats_summary(name: str, res: BuildResult) -> list[str]:
@@ -35,8 +36,7 @@ def _stats_summary(name: str, res: BuildResult) -> list[str]:
     lines = [
         f"{name}: {s['sources']} memory files; {s['l0_items']} of {s['resident']} resident entries in {L0_NAME},"
         f" {s['l1_items']} in {s['l1_name']}; {s['manual']} manual lines, {s['pending']} pending",
-        f"{L0_NAME}: {s['l0_bytes']:,} of {s['budget_bytes']:,} bytes, {s['l0_lines']} of {s['budget_lines']} lines;"
-        f" overflow {s['overflow']}, unresolved {s['unresolved']}",
+        budget_line(s),
     ]
     if "written" in s:
         lines.append("wrote " + ", ".join(s["written"]) if s["written"] else "up to date: nothing written")
@@ -61,14 +61,12 @@ class Command:
 
 
 def _transcripts(value: str) -> int:
-    """--transcripts N: a whole number from 1 to MAX_TRANSCRIPTS."""
+    """--transcripts N, checked by transcripts.check_count."""
     try:
-        n = int(value)
+        return check_count(int(value))
     except ValueError:
-        n = 0
-    if not 1 <= n <= MAX_TRANSCRIPTS:
-        raise argparse.ArgumentTypeError(f"expected a whole number from 1 to {MAX_TRANSCRIPTS}, not {value!r}")
-    return n
+        raise argparse.ArgumentTypeError(
+            f"expected a whole number from {MIN_TRANSCRIPTS} to {MAX_TRANSCRIPTS}, not {value!r}") from None
 
 
 def _snapshot(value: str) -> str:
@@ -87,7 +85,8 @@ def _build_options(parser: argparse.ArgumentParser) -> None:
 def _suggest_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--transcripts", type=_transcripts, metavar="N",
-        help=f"also rank by mentions in the N most recent transcripts of this project (1-{MAX_TRANSCRIPTS})",
+        help=f"also rank by mentions in the N most recent transcripts of this project"
+             f" ({MIN_TRANSCRIPTS}-{MAX_TRANSCRIPTS})",
     )
     parser.add_argument("--apply", action="store_true", help="demote the proposed memories and rebuild")
 
@@ -171,7 +170,7 @@ def report(name: str, res: BuildResult) -> list[str]:
 
 def _output(code: int) -> TextIO:
     """Exit 0 or 1 is a result (1: overflow, out of sync, lint errors) for stdout; 2 or more is a failure."""
-    return sys.stdout if code in (EXIT_OK, EXIT_OVERFLOW) else sys.stderr
+    return sys.stdout if code in (EXIT_OK, EXIT_ATTENTION) else sys.stderr
 
 
 def _emit(name: str, res: BuildResult, as_json: bool) -> None:

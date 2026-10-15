@@ -10,36 +10,32 @@ alone. The render record gives only the hashes of MEMORY.md and the configured L
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
-import time
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Tuple
 
-from .build import EXIT_CONCURRENT, EXIT_USAGE, BuildResult
 from .generated import MIGRATING_MARK, RECORD_MAX_BYTES, Current, Record, as_text, is_l1_text, read_current, read_record
 from .items import MANUAL_NAME, PENDING_NAME
-from .plan import Refusal
-from .safeio import Fingerprint, StoreDir
-from .store import CONFIG_NAME, L0_NAME, RENDER_MARK, Config, reject_duplicates, valid_source_name
+from .jsonfile import JSONFileError, parse_object
+from .result import EXIT_CONCURRENT, EXIT_USAGE, BuildResult, Refusal
+from .safeio import Fingerprint, StoreDir, is_sha256
+from .stamps import parse_stamp, utc_stamp, with_suffix
+from .store import CONFIG_NAME, L0_NAME, RENDER_MARK, Config, valid_source_name
 
 SNAPSHOT_PREFIX = ".index-backup-"
-SNAPSHOT_ID = re.compile(r"\A[0-9]{8}T[0-9]{6}Z(?:-[0-9]{1,6})?\Z")
 MANIFEST_NAME = "manifest.json"
 MANIFEST_VERSION = 1
 MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 MARKER_MAX_BYTES = 4096
 DATA_NAMES = (MANUAL_NAME, PENDING_NAME, CONFIG_NAME)
 _MANIFEST_KEYS = {"version", "created", "files", "manual_after"}
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 Target = Tuple[str, Optional[str], Optional[str]]
 Now = Tuple[Optional[Current], Optional[str]]
 UNKNOWN = ""  # an after-hash no file can have: the file is put back only if it still holds its before-hash
 
 
-def sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _sha(data: bytes) -> str:
+    return Fingerprint.of(data).sha256
 
 
 @dataclass
@@ -61,7 +57,7 @@ class Manifest:
 
 
 def _sha_or_none(value: object) -> bool:
-    return value is None or (isinstance(value, str) and _SHA256.match(value) is not None)
+    return value is None or is_sha256(value)
 
 
 def _entry(name: object, value: object) -> Optional[Entry]:
@@ -78,11 +74,11 @@ def _entry(name: object, value: object) -> Optional[Entry]:
 def parse_manifest(data: bytes, where: str) -> Manifest:
     """A manifest checked strictly; anything unexpected is a usage error (exit 2)."""
     try:
-        obj = json.loads(data.decode("utf-8"), object_pairs_hook=reject_duplicates)
-    except (ValueError, RecursionError) as e:
-        raise Refusal(EXIT_USAGE, f"{where} is not valid JSON: {e}") from e
+        obj = parse_object(data, where)
+    except JSONFileError as e:
+        raise Refusal(EXIT_USAGE, str(e)) from e
     bad = Refusal(EXIT_USAGE, f"{where} is not a migration manifest")
-    if not isinstance(obj, dict) or set(obj) != _MANIFEST_KEYS or obj["version"] != MANIFEST_VERSION:
+    if set(obj) != _MANIFEST_KEYS or obj["version"] != MANIFEST_VERSION:
         raise bad
     if (type(obj["version"]) is not int or not isinstance(obj["created"], str) or not isinstance(obj["files"], dict)
             or not _sha_or_none(obj["manual_after"])):
@@ -97,13 +93,11 @@ def parse_manifest(data: bytes, where: str) -> Manifest:
 
 
 def new_snapshot_id(sd: StoreDir, now: Optional[float] = None) -> str:
-    """UTC YYYYmmddTHHMMSSZ, with a -1, -2... suffix when that snapshot already exists."""
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
-    ident, n = stamp, 0
-    while sd.kind(SNAPSHOT_PREFIX + ident) != "missing":
+    """The UTC stamp of now, with the first -1, -2... suffix that no snapshot has when one has none."""
+    stamp, n = utc_stamp(now), 0
+    while sd.kind(SNAPSHOT_PREFIX + with_suffix(stamp, n)) != "missing":
         n += 1
-        ident = f"{stamp}-{n}"
-    return ident
+    return with_suffix(stamp, n)
 
 
 class Snapshot:
@@ -128,21 +122,21 @@ class Snapshot:
         manifest = Manifest(self.ident)
         for name, data in sorted(originals.items()):
             self._put(name, data)
-            manifest.files[name] = Entry(sha256(data), None)
+            manifest.files[name] = Entry(_sha(data), None)
         self.manifest = manifest
         return manifest
 
     def intend(self, manifest: Manifest, name: str, current: bytes, new: bytes) -> None:
         """Record new as name's after-hash; a file changed since it was copied is copied again."""
         entry = manifest.files.get(name)
-        if entry is None or sha256(current) not in (entry.before, entry.after):
+        if entry is None or _sha(current) not in (entry.before, entry.after):
             self._put(name, current)
-            entry = manifest.files[name] = Entry(sha256(current), None)
-        entry.after = sha256(new)
+            entry = manifest.files[name] = Entry(_sha(current), None)
+        entry.after = _sha(new)
 
     def intend_new(self, manifest: Manifest, name: str, new: bytes) -> None:
         """Record a file the migration creates: no before-hash, new as its after-hash."""
-        manifest.files[name] = Entry(None, sha256(new))
+        manifest.files[name] = Entry(None, _sha(new))
 
     def created(self) -> Optional[str]:
         """The file the recorded migration creates, or None (no manifest yet, or no such file)."""
@@ -151,10 +145,10 @@ class Snapshot:
 
     def intend_manual(self, manifest: Manifest, current: Optional[bytes], new: bytes) -> None:
         entry = manifest.files.get(MANUAL_NAME)
-        if current is not None and sha256(current) not in (manifest.manual_after, entry.before if entry else None):
+        if current is not None and _sha(current) not in (manifest.manual_after, entry.before if entry else None):
             self._put(MANUAL_NAME, current)
-            manifest.files[MANUAL_NAME] = Entry(sha256(current), None)
-        manifest.manual_after = sha256(new)
+            manifest.files[MANUAL_NAME] = Entry(_sha(current), None)
+        manifest.manual_after = _sha(new)
 
     def save(self, manifest: Manifest) -> None:
         data = manifest.to_bytes()
@@ -166,7 +160,7 @@ class Snapshot:
 def marker_ident(data: Optional[bytes]) -> Optional[str]:
     """The snapshot id a .index-migrating marker names, or None when it names none."""
     text = (as_text(data) or "").strip()
-    return text if SNAPSHOT_ID.match(text) else None
+    return text if parse_stamp(text) else None
 
 
 def _current(sd: StoreDir, name: str) -> Now:
@@ -280,7 +274,7 @@ def restore(sd: StoreDir, cfg: Config, ident: str, res: BuildResult) -> None:
     A snapshot without a manifest belongs to a run that stopped while copying, before it changed
     anything but the marker; only the marker is removed then.
     """
-    if not SNAPSHOT_ID.match(ident):
+    if parse_stamp(ident) is None:
         raise Refusal(EXIT_USAGE, f"--restore expects a snapshot id such as 20260101T120000Z, not {ident!r}")
     name = SNAPSHOT_PREFIX + ident
     if sd.kind(name) != "dir":
@@ -292,7 +286,7 @@ def restore(sd: StoreDir, cfg: Config, ident: str, res: BuildResult) -> None:
         if manifest is not None:
             restored, conflicts = _undo(sd, snap, manifest, cfg)
     _drop_marker(sd, ident, res)
-    res.stats.update(mode="restore", snapshot=name, restored=restored, conflicts=sorted(conflicts))
+    res.stats.update({"mode": "restore", "snapshot": name, "restored": restored, "conflicts": sorted(conflicts)})
     if conflicts:
         res.messages.extend(f"left alone: {message}" for message in conflicts.values())
         res.code = EXIT_CONCURRENT

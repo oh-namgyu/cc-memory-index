@@ -40,7 +40,7 @@ def test_line_for_a_new_memory_is_folded_into_its_frontmatter(tmp_path: Path) ->
     assert res.stats["manual_added"] == [] and res.stats["unrescuable"] == []
     fm = parse((root / "new_note.md").read_text(encoding="utf-8"))
     assert (fm.get("idx"), fm.get("idx_section"), fm.get("idx_sub"), fm.get("idx_order")) == (
-        line[2:], "", "", "1000001")
+        line[2:], None, None, "1000001")  # an empty section or subsection is not written
     assert _pending(root) == [] and not (root / MANUAL_NAME).exists()
     l1 = (root / L1).read_text(encoding="utf-8")
     assert line not in (root / L0).read_text(encoding="utf-8") and line + "\n" in l1
@@ -148,7 +148,7 @@ def test_line_added_to_l1_is_rescued_too(tmp_path: Path) -> None:
     res = run_build(str(root), False)
     assert res.code == 0
     assert res.stats["rescued"] == [{"file": "new_note.md", "idx": "[New note](new_note.md) — from L1"}]
-    assert parse((root / "new_note.md").read_text(encoding="utf-8")).get("idx_section") == ""
+    assert parse((root / "new_note.md").read_text(encoding="utf-8")).get("idx_section") is None
     _settled(root)
 
 

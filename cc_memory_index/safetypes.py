@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass
-from typing import Union
+from typing import Iterable, Literal, Union
+
+EntryKind = Literal["file", "link", "dir", "other"]
+Kind = Literal["file", "link", "dir", "other", "missing"]
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class SafeIOError(Exception):
@@ -32,8 +38,29 @@ class RootChanged(SafeIOError):
 
 @dataclass(frozen=True)
 class Fingerprint:
+    """Size and SHA-256 (lowercase hex) of a file's content: the only hash this tool computes."""
+
     size: int
     sha256: str
+
+    @classmethod
+    def of_pieces(cls, pieces: Iterable[bytes]) -> Fingerprint:
+        """The fingerprint of the content that pieces make up, read once."""
+        h = hashlib.sha256()
+        size = 0
+        for piece in pieces:
+            h.update(piece)
+            size += len(piece)
+        return cls(size, h.hexdigest())
+
+    @classmethod
+    def of(cls, data: bytes) -> Fingerprint:
+        return cls.of_pieces((data,))
+
+
+def is_sha256(value: object) -> bool:
+    """True for a SHA-256 written as Fingerprint.sha256 is (64 lowercase hex digits)."""
+    return isinstance(value, str) and _SHA256.match(value) is not None
 
 
 class _AnyType:

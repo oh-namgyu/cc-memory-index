@@ -36,6 +36,12 @@ def sanitize(s: str) -> str:
     return _REMOVE.sub("", _TO_SPACE.sub(" ", s)).strip()
 
 
+def quote(value: object, limit: int = 80) -> str:
+    """value as a message shows it: a string cut to limit characters and repr-quoted, anything else
+    its repr cut to limit characters. Store content is untrusted and can be of any length."""
+    return repr(value[:limit]) if isinstance(value, str) else repr(value)[:limit]
+
+
 def normalize_ws(s: str) -> str:
     """Collapse every run of whitespace to one space and strip."""
     return " ".join(s.split())

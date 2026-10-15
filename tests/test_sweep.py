@@ -10,10 +10,11 @@ from typing import Callable
 import pytest
 from storekit import built_store, make_store, write_index, write_memory
 
-from cc_memory_index.build import BuildResult, run_build, run_check
+from cc_memory_index.build import run_build, run_check
 from cc_memory_index.demote import run_demote
 from cc_memory_index.migrate import run_migrate
 from cc_memory_index.migrate_snapshot import SNAPSHOT_PREFIX
+from cc_memory_index.result import BuildResult
 from cc_memory_index.safeio import StoreDir
 from cc_memory_index.suggest import run_suggest
 

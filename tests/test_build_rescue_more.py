@@ -103,7 +103,7 @@ def test_line_added_to_an_l0_without_sections(tmp_path: Path) -> None:
     line = claude_adds_memory(root)
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["rescued"][0]["file"] == "new_note.md"
-    assert parse((root / "new_note.md").read_text(encoding="utf-8")).get("idx_section") == ""
+    assert parse((root / "new_note.md").read_text(encoding="utf-8")).get("idx_section") is None
     assert "## Project\n- [A](a.md)\n" + line + "\n" in (root / L1).read_text(encoding="utf-8")
     _settled(root)
 

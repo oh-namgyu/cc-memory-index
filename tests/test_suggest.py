@@ -11,10 +11,11 @@ import pytest
 from storekit import make_store, project_store, sample_store, snapshot, write_json, write_memory, write_transcript
 
 from cc_memory_index import transcripts as tr
-from cc_memory_index.build import BuildResult, run_build, run_check
+from cc_memory_index.build import run_build, run_check
 from cc_memory_index.demote import demote_files
 from cc_memory_index.frontmatter import parse
 from cc_memory_index.items import MANUAL_NAME
+from cc_memory_index.result import BuildResult
 from cc_memory_index.suggest import run_suggest
 
 TIGHT = {"budget_bytes": 2048, "budget_lines": 20}

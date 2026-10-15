@@ -8,20 +8,20 @@ Rendering the plan in memory gives the would-be L0 and L1.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 from typing import AbstractSet, Mapping, Optional, Sequence, Union
 
 from . import frontmatter
-from .items import (
-    DEFAULT_SECTION, RESIDENT, Manual, ManualLine, PendingEntry, items_from_sources, manual_bytes, manual_items,
-)
+from .items import DEFAULT_SECTION, RESIDENT, Manual, ManualLine, PendingEntry, manual_bytes
 from .links import memory_links
-from .migrate_notes import Notes, Verbatim, notes_text
-from .render import BULLET, Rendered, render
+from .markdown import Verbatim
+from .migrate_notes import Notes, notes_text
+from .plan import render_store
+from .render import Rendered
 from .safeio import Fingerprint
+from .segments import BULLET, pieces
 from .store import Config, Source
-from .text import normalize_ws, sanitize, split_segments, strip_bom
+from .text import quote, sanitize, split_segments, strip_bom
 
 ORDER_STEP = 10
 _SECTION = "## "
@@ -29,7 +29,10 @@ _SUB = "### "
 
 
 @dataclass(frozen=True)
-class Segment:
+class IndexSegment:
+    """A segment of a hand-written index line, its section and subsection, its order (10, 20, 30... in
+    order of appearance) and the number of its line."""
+
     text: str
     section: str
     sub: str
@@ -42,12 +45,12 @@ class Index:
     """A hand-written index cut up: preamble (None when blank), segments of the index lines, notes."""
 
     preamble: Optional[str]
-    segments: list[Segment]
+    segments: list[IndexSegment]
     notes: Notes
 
 
 @dataclass
-class Plan:
+class MigrationPlan:
     """What the migration writes: texts are the patched memory files; notes_name is the notes file,
     None when there are no notes. messages explain the segments kept as manual lines."""
 
@@ -105,7 +108,7 @@ def split_index(text: str) -> Index:
         lines.pop()
     start = _body_start(text, lines)
     preamble = "\n".join(lines[:start]).strip("\n")
-    segments: list[Segment] = []
+    segments: list[IndexSegment] = []
     notes, verbatim = Notes(), Verbatim()
     section, sub = DEFAULT_SECTION, ""
     for number, line in enumerate(lines[start:], start + 1):
@@ -121,21 +124,22 @@ def split_index(text: str) -> Index:
         else:
             notes.gap()
             for piece in _pieces(line) if kind == "item" else []:
-                segments.append(Segment(piece, section, sub, ORDER_STEP * (len(segments) + 1), number))
+                segments.append(IndexSegment(piece, section, sub, ORDER_STEP * (len(segments) + 1), number))
     return Index(preamble if preamble.strip() else None, segments, notes)
 
 
-def _resident_text(src: Source, seg: Segment) -> tuple[Optional[str], str]:
+def _resident_text(src: Source, seg: IndexSegment) -> tuple[Optional[str], str]:
     """src's text with the segment as its resident idx, or None and the reason it cannot be."""
-    add: dict[str, Union[str, int]] = {"tier": RESIDENT, "idx": seg.text, "idx_section": seg.section,
-                                       "idx_sub": seg.sub, "idx_order": seg.order}
+    add: dict[str, Union[str, int]] = {"tier": RESIDENT, "idx": seg.text, "idx_order": seg.order}
+    # An absent idx_section or idx_sub means the same as an empty one (DESIGN §3), so neither is written empty.
+    add.update({key: value for key, value in (("idx_section", seg.section), ("idx_sub", seg.sub)) if value})
     try:
         return frontmatter.patch_checked(src.text, add, check=("idx", "tier")), ""
     except frontmatter.PatchError as e:
         return None, f"its frontmatter cannot be patched ({e})"
 
 
-def _assign(plan: Plan, seg: Segment, by_name: Mapping[str, Source], blocked: AbstractSet[str],
+def _assign(plan: MigrationPlan, seg: IndexSegment, by_name: Mapping[str, Source], blocked: AbstractSet[str],
             claimed: set[str]) -> bool:
     """Make seg its source's resident idx when it can be; False means a manual line."""
     links = memory_links(seg.text)
@@ -144,7 +148,7 @@ def _assign(plan: Plan, seg: Segment, by_name: Mapping[str, Source], blocked: Ab
     target = links[0]
     src = by_name.get(target)
     if src is None:
-        reason = f"{target!r} is not a readable memory file in this store"
+        reason = f"{quote(target)} is not a readable memory file in this store"
     elif target in claimed:
         reason = f"an earlier line already links {target}"
     elif target in blocked:
@@ -161,11 +165,11 @@ def _assign(plan: Plan, seg: Segment, by_name: Mapping[str, Source], blocked: Ab
     return False
 
 
-def make_plan(index_text: str, sources: Sequence[Source], blocked: AbstractSet[str], notes_name: str) -> Plan:
+def make_plan(index_text: str, sources: Sequence[Source], blocked: AbstractSet[str], notes_name: str) -> MigrationPlan:
     """Plan the migration of index_text (LF line endings); blocked names are never patched, and
     notes_name is the name the notes file gets when there are notes."""
     index = split_index(index_text)
-    plan = Plan(index, notes_name if index.notes.lines else None)
+    plan = MigrationPlan(index, notes_name if index.notes.lines else None)
     by_name = {src.name: src for src in sources}
     claimed: set[str] = set()
     for seg in index.segments:
@@ -174,42 +178,25 @@ def make_plan(index_text: str, sources: Sequence[Source], blocked: AbstractSet[s
     return plan
 
 
-def manual_file(plan: Plan) -> bytes:
+def manual_file(plan: MigrationPlan) -> bytes:
     """.index-manual.json holding the plan's preamble and manual lines (written even when both are empty)."""
     return manual_bytes(Manual(plan.index.preamble, list(plan.manual)))
 
 
-def render_store(sources: Sequence[Source], manual: Manual, pending: Sequence[PendingEntry],
-                 cfg: Config) -> Rendered:
-    items = items_from_sources(sources, pending) + manual_items(manual)
-    return render(items, manual.preamble, cfg)
-
-
 def _source(name: str, text: str) -> Source:
-    data = text.encode("utf-8")
-    fp = Fingerprint(len(data), hashlib.sha256(data).hexdigest())
-    return Source(name, text, fp, frontmatter.parse(text))
+    return Source(name, text, Fingerprint.of(text.encode("utf-8")), frontmatter.parse(text))
 
 
-def preview(plan: Plan, sources: Sequence[Source], pending: Sequence[PendingEntry], cfg: Config) -> Rendered:
+def preview(plan: MigrationPlan, sources: Sequence[Source], pending: Sequence[PendingEntry], cfg: Config) -> Rendered:
     """L0 and L1 as they would be rendered once the plan is applied."""
     patched = [_source(src.name, plan.texts[src.name]) if src.name in plan.texts else src for src in sources]
     notes = plan.notes_file()
     if notes is not None and notes[0] not in {src.name for src in sources}:
         patched.append(_source(*notes))
-    return render_store(patched, Manual(plan.index.preamble, plan.manual), pending, cfg)
+    return render_store(patched, Manual(plan.index.preamble, plan.manual), pending, cfg)[1]
 
 
-def _rendered_segments(rendered: Rendered) -> set[str]:
-    found: set[str] = set()
-    for text in (rendered.l0, rendered.l1):
-        for line in text.split("\n"):
-            pieces = split_segments(line[len(BULLET):]) if line.startswith(BULLET) else [line]
-            found.update(normalize_ws(piece) for piece in pieces)
-    return found
-
-
-def missing_segments(segments: Sequence[Segment], rendered: Rendered) -> list[str]:
-    """Original segments that are not in L0 or L1 (whitespace-normalised)."""
-    found = _rendered_segments(rendered)
-    return [seg.text for seg in segments if not all(normalize_ws(p) in found for p in split_segments(seg.text))]
+def missing_segments(segments: Sequence[IndexSegment], rendered: Rendered) -> list[str]:
+    """Original segments that are not in L0 or L1, compared in pieces as the rescue compares them."""
+    found = set(rendered.pieces())
+    return [seg.text for seg in segments if not all(p in found for p in pieces(seg.text))]

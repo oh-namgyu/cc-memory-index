@@ -1,5 +1,5 @@
-"""Reading generated index text back as lines and segments, shared by the renderer and the rescuer
-(DESIGN §6).
+"""Reading generated index text back as lines and segments, shared by the renderer, the rescuer and
+migrate (DESIGN §4, §6, §8).
 
 A generated list line holds exactly one item. Lines written by hand may hold several: a segment is
 one ` · `-separated piece of a list line, split outside brackets and parentheses, or any other
@@ -13,6 +13,7 @@ from typing import Callable, Iterable, Optional, Sequence
 
 from .text import normalize_ws, sanitize, split_segments
 
+BULLET = "- "
 OVERFLOW = "Overflow"
 UNRESOLVED = "Unresolved"
 _RESERVED = frozenset({OVERFLOW.lower(), UNRESOLVED.lower()})
@@ -20,8 +21,8 @@ SECTION_SUFFIX = " (section)"
 
 
 @dataclass(frozen=True)
-class Seg:
-    """A segment and the section and subsection it appeared under ('' before any heading)."""
+class BodySegment:
+    """A segment of a file's body and the section and subsection it appeared under ('' before any heading)."""
 
     text: str
     section: str
@@ -37,6 +38,17 @@ def pieces(text: str) -> list[str]:
     """The normalised segments that a list line holding text splits into; text that is equal when
     normalised splits into the same pieces."""
     return split_segments(norm(text))
+
+
+def list_items(lines: Iterable[str]) -> list[str]:
+    """The normalised text after '- ' of every list line among lines: in a rendered L0 or L1, its items."""
+    return [norm(line[len(BULLET):]) for line in lines if line.startswith(BULLET)]
+
+
+def item_pieces(lines: Iterable[str]) -> list[str]:
+    """The pieces (see pieces) of the list lines among lines: what rendered L0 and L1 text is cut into
+    to be compared with other text (DESIGN §4, §6, §8)."""
+    return [p for text in list_items(lines) for p in split_segments(text)]
 
 
 def _reserved(name: str) -> bool:
@@ -69,10 +81,10 @@ class BodyLine:
     sub: str
     listed: bool
 
-    def segments(self) -> list[Seg]:
+    def segments(self) -> list[BodySegment]:
         """A list line split on ' · ' outside brackets and parentheses; any other line whole."""
         texts = split_segments(self.text) if self.listed else [self.text]
-        return [Seg(text, self.section, self.sub) for text in texts]
+        return [BodySegment(text, self.section, self.sub) for text in texts]
 
 
 def body_lines(lines: Iterable[str], l1: bool) -> list[BodyLine]:

@@ -3,17 +3,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
-import time
 from dataclasses import dataclass, field
-from typing import AbstractSet, Mapping, Optional
+from typing import AbstractSet, Literal, Mapping, Optional
 
+from .jsonfile import JSONFileError, parse_object
 from .render import L1_TITLE, l1_head, preamble_lines
-from .safeio import ANY, Fingerprint, SafeIOError, StoreDir
+from .safeio import ANY, Fingerprint, SafeIOError, StoreDir, is_sha256
 from .segments import norm
-from .store import L0_NAME, Config, reject_duplicates, valid_source_name
+from .stamps import parse_stamp, utc_stamp, with_suffix
+from .store import L0_NAME, RENDER_MARK, Config, valid_l1_name
 from .text import strip_bom
 
 MIGRATING_MARK = ".index-migrating"
@@ -22,9 +21,8 @@ RECORD_MAX_BYTES = 64 * 1024
 GENERATED_MAX_BYTES = 4 * 1024 * 1024
 DEFAULT_L1_NAME = Config.l1_name
 BACKUPS_KEPT = 5
-_STAMP = re.compile(r"([0-9]{8}T[0-9]{6}Z)(?:-([0-9]{1,6}))?\Z")
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _RECORD_KEYS = frozenset({"version", "l0", "l1", "l1_name", "stale"})
+Role = Literal["l0", "l1"]  # what a generated file is: MEMORY.md, or the L1 file
 
 
 @dataclass(frozen=True)
@@ -46,7 +44,7 @@ class Record:
     l1_name: str = DEFAULT_L1_NAME
     stale: Mapping[str, str] = field(default_factory=dict)
 
-    def accepts(self, role: str, name: str, sha: str) -> bool:
+    def accepts(self, role: Role, name: str, sha: str) -> bool:
         """True when sha is content this tool wrote for that role."""
         if role == "l0":
             return sha == self.l0
@@ -71,7 +69,7 @@ def as_text(data: Optional[bytes]) -> Optional[str]:
 
 
 def sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return Fingerprint.of(text.encode("utf-8")).sha256
 
 
 def known_lines(preamble: Optional[str]) -> frozenset[str]:
@@ -99,31 +97,22 @@ def record_bytes(l0: str, l1: str, l1_name: str = DEFAULT_L1_NAME, stale: Option
     return (json.dumps(obj, indent=2) + "\n").encode("utf-8")
 
 
-def _is_sha(value: object) -> bool:
-    return isinstance(value, str) and _SHA256.match(value) is not None
-
-
-def _is_l1_name(value: object) -> bool:
-    return isinstance(value, str) and valid_source_name(value) and value.lower() != L0_NAME.lower()
-
-
 def read_record(current: Current) -> Optional[Record]:
     """The render record, or None when absent or malformed. A record without l1_name means the default."""
-    text = as_text(current.data)
-    if text is None:
+    if current.data is None:
         return None
     try:
-        obj = json.loads(text, object_pairs_hook=reject_duplicates)
-    except (ValueError, RecursionError):
+        obj = parse_object(current.data, RENDER_MARK)
+    except JSONFileError:
         return None
-    if not isinstance(obj, dict) or not {"version", "l0", "l1"} <= set(obj) <= _RECORD_KEYS:
+    if not {"version", "l0", "l1"} <= set(obj) <= _RECORD_KEYS:
         return None
     if type(obj["version"]) is not int or obj["version"] != RECORD_VERSION:
         return None
     l1_name, stale = obj.get("l1_name", DEFAULT_L1_NAME), obj.get("stale", {})
-    if not (_is_sha(obj["l0"]) and _is_sha(obj["l1"]) and _is_l1_name(l1_name) and isinstance(stale, dict)):
+    if not (is_sha256(obj["l0"]) and is_sha256(obj["l1"]) and valid_l1_name(l1_name) and isinstance(stale, dict)):
         return None
-    if not all(_is_l1_name(name) and _is_sha(sha) for name, sha in stale.items()):
+    if not all(valid_l1_name(name) and is_sha256(sha) for name, sha in stale.items()):
         return None
     return Record(obj["l0"], obj["l1"], l1_name, dict(stale))
 
@@ -136,15 +125,15 @@ def needs_migration(l0: Optional[bytes], has_record: bool, has_manual: bool) -> 
 
 
 def edited_generated_files(
-    record: Optional[Record], current: Mapping[str, Current], fresh: Mapping[str, str], known: AbstractSet[str]
-) -> list[str]:
+    record: Optional[Record], current: Mapping[Role, Current], fresh: Mapping[Role, str], known: AbstractSet[str]
+) -> list[Role]:
     """Roles ('l0', 'l1') of the generated files whose current content writing the fresh render would lose.
 
     current and fresh are keyed by role. A file is not edited when it is absent, holds nothing but
     blank lines and known lines (see known_lines), equals the fresh render (an interrupted build
     converges), or matches what this tool recorded when it last wrote it. CRLF is normalised first.
     """
-    edited: list[str] = []
+    edited: list[Role] = []
     for role, cur in current.items():
         if not has_content(cur.data, known):
             continue
@@ -191,8 +180,7 @@ def backup_prefix(name: str) -> str:
 
 
 def _backup_key(prefix: str, name: str) -> Optional[tuple[str, int]]:
-    m = _STAMP.match(name[len(prefix):]) if name.startswith(prefix) else None
-    return (m.group(1), int(m.group(2) or 0)) if m else None
+    return parse_stamp(name[len(prefix):]) if name.startswith(prefix) else None
 
 
 def backup_generated(sd: StoreDir, name: str, data: bytes, now: Optional[float] = None) -> str:
@@ -208,9 +196,9 @@ def backup_generated(sd: StoreDir, name: str, data: bytes, now: Optional[float] 
     if keyed and _holds(sd, keyed[-1][1], data):
         backup = keyed[-1][1]
     else:
-        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
+        stamp = utc_stamp(now)
         same_second = [key[1] for key, _ in keyed if key[0] == stamp]
-        backup = prefix + stamp + (f"-{max(same_second) + 1}" if same_second else "")
+        backup = prefix + with_suffix(stamp, max(same_second) + 1 if same_second else 0)
         sd.replace(backup, data, None)
     _prune_backups(sd, prefix, backup)
     return backup
@@ -235,8 +223,7 @@ def _holds(sd: StoreDir, name: str, data: bytes) -> bool:
         return False
     if kind != "file" or size != len(data) or sd.nlink(name) != 1:
         return False
-    found = sd.fingerprint(name)
-    return found is not None and found.sha256 == hashlib.sha256(data).hexdigest()
+    return sd.fingerprint(name) == Fingerprint.of(data)
 
 
 def _prune_backups(sd: StoreDir, prefix: str, keep: str) -> None:

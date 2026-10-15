@@ -5,9 +5,14 @@ import unicodedata
 
 import pytest
 
-from cc_memory_index.text import normalize_ws, sanitize, split_segments, strip_bom, utf8_prefix
+from cc_memory_index.text import normalize_ws, quote, sanitize, split_segments, strip_bom, utf8_prefix
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_quote_bounds_what_a_message_shows_of_store_content() -> None:
+    assert quote("x" * 500) == repr("x" * 80) and quote("a'b", 2) == repr("a'")
+    assert quote(list(range(1000))) == repr(list(range(1000)))[:80] and quote(3) == "3"
 
 
 def test_sanitize_turns_line_breaks_and_tabs_into_spaces() -> None:

@@ -8,8 +8,9 @@ from __future__ import annotations
 from typing import Sequence
 
 from . import frontmatter
-from .build import EXIT_OK, EXIT_PARSE, EXIT_USAGE, BuildResult, outcome, run_build, swept, writing
-from .plan import Refusal, refuse_if_migrating
+from .build import run_build
+from .plan import refuse_if_migrating
+from .result import EXIT_OK, EXIT_PARSE, EXIT_USAGE, BuildResult, Refusal, outcome, swept, writing
 from .safeio import StoreDir
 from .store import L0_NAME, Config, Source, load_config, load_source, skip_reason, valid_source_name
 

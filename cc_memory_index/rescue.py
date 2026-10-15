@@ -8,16 +8,23 @@ generated files are replaced.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Mapping, Optional, Sequence
+from typing import Callable, Iterable, Literal, Mapping, Optional, Sequence
 
-from .items import DEFAULT_SECTION, MANUAL_NAME, ORDER_LIMIT, PENDING_NAME, ManualLine, PendingEntry, default_idx
+from .generated import Role
+from .items import (
+    DEFAULT_SECTION, MANUAL_NAME, ORDER_LIMIT, PENDING_NAME, ManualLine, PendingEntry, default_idx, explicit_idx,
+)
 from .links import memory_links
 from .render import Rendered, RenderInvariant, is_warning_line, l1_head, link_line, preamble_lines
-from .segments import BodyLine, Seg, body_lines, norm, pieces, split_head
+from .segments import BodyLine, BodySegment, body_lines, item_pieces, list_items, norm, pieces, split_head
 from .store import Source, valid_source_name
-from .text import sanitize, strip_bom
+from .text import quote, sanitize, strip_bom
 
 HINT = "edit the memory file's frontmatter (metadata.idx) instead"
+UnrescuableKind = Literal[
+    "not-utf8", "header-edited", "preamble-edited", "several-links", "unsafe-target", "missing-target",
+    "edited-generated-line", "pending-target", "duplicate-target",
+]
 
 
 @dataclass(frozen=True)
@@ -25,7 +32,7 @@ class Edited:
     """A generated file whose content differs from what this tool wrote; text is None when not UTF-8."""
 
     name: str
-    role: str
+    role: Role
     text: Optional[str]
 
 
@@ -47,15 +54,13 @@ class Context:
 
 @dataclass(frozen=True)
 class Unrescuable:
-    """A hand edit that cannot be kept. kind is one of the stable names below, for callers that must
-    not relay the (untrusted) segment or the reason quoting it: not-utf8, header-edited,
-    preamble-edited, several-links, unsafe-target, missing-target, edited-generated-line,
-    pending-target, duplicate-target."""
+    """A hand edit that cannot be kept. kind is a stable name (UnrescuableKind) for callers that must
+    not relay the (untrusted) segment or the reason quoting it."""
 
     file: str
     segment: str
     reason: str
-    kind: str
+    kind: UnrescuableKind
 
 
 @dataclass
@@ -68,7 +73,7 @@ class Rescue:
     entries: list[PendingEntry] = field(default_factory=list)
     lines: list[ManualLine] = field(default_factory=list)
     unrescuable: list[Unrescuable] = field(default_factory=list)
-    pieces: dict[str, list[str]] = field(default_factory=dict)
+    pieces: dict[Role, list[str]] = field(default_factory=dict)
 
 
 def default_pieces(sources: Iterable[Source]) -> frozenset[str]:
@@ -97,20 +102,20 @@ def _split(text: str, l1: bool, preamble: Optional[str], l1_names: Sequence[str]
     return split_head(lines, *_l0_head(preamble, l1_names))
 
 
-def _rendered_lines(rendered: Rendered, preamble: Optional[str], l1_name: str) -> list[BodyLine]:
-    """The body lines of rendered L0 and L1 (their heads excluded)."""
-    out: list[BodyLine] = []
+def _rendered_bodies(rendered: Rendered, preamble: Optional[str], l1_name: str) -> list[str]:
+    """The lines of rendered L0 and L1 after their heads."""
+    out: list[str] = []
     for text, l1 in ((rendered.l0, False), (rendered.l1, True)):
         rest, _ = _split(text, l1, preamble, (l1_name,))
         if rest is None:
             raise RenderInvariant("a rendered file does not start with its head")
-        out += body_lines(rest, l1)
+        out += rest
     return out
 
 
 def body_pieces(rendered: Rendered, preamble: Optional[str], l1_name: str) -> set[str]:
     """Normalised segments of the bodies of rendered L0 and L1 (their heads excluded)."""
-    return {p for line in _rendered_lines(rendered, preamble, l1_name) for p in pieces(line.text)}
+    return set(item_pieces(_rendered_bodies(rendered, preamble, l1_name)))
 
 
 def _body(ed: Edited, ctx: Context, out: Rescue) -> Optional[list[BodyLine]]:
@@ -132,17 +137,17 @@ def _body(ed: Edited, ctx: Context, out: Rescue) -> Optional[list[BodyLine]]:
     return body_lines(rest, l1)
 
 
-def _refusal(links: Sequence[str], ctx: Context, claimed: set[str]) -> Optional[tuple[str, str]]:
+def _refusal(links: Sequence[str], ctx: Context, claimed: set[str]) -> Optional[tuple[str, UnrescuableKind]]:
     """(why, kind) when a segment that links to memory files cannot be rescued, or None when it can."""
     if len(links) > 1:
         return f"links to {len(links)} memory files, so it cannot be one file's index line; {HINT}", "several-links"
     target = links[0]
     if not valid_source_name(target):
-        return f"link target {target[:80]!r} is not a memory file in this directory; {HINT}", "unsafe-target"
+        return f"link target {quote(target)} is not a memory file in this directory; {HINT}", "unsafe-target"
     src = ctx.sources.get(target)
     if src is None:
         return f"{target} does not exist or could not be read; {HINT}", "missing-target"
-    if sanitize(src.fm.get("idx") or ""):
+    if explicit_idx(src):
         return (f"{target} already has an index line (metadata.idx), so this is an edited generated line; {HINT}",
                 "edited-generated-line")
     if target in ctx.pending_files:
@@ -155,12 +160,12 @@ def _refusal(links: Sequence[str], ctx: Context, claimed: set[str]) -> Optional[
 def _generated(ctx: Context) -> tuple[set[str], set[str]]:
     """The generated lines and their pieces: those of the fresh render's bodies and every
     source's default line."""
-    rendered = _rendered_lines(ctx.rendered, ctx.preamble, ctx.l1_names[0])
-    lines = {norm(line.text) for line in rendered} | {norm(default_idx(src)) for src in ctx.sources.values()}
-    return lines, {p for line in rendered for p in pieces(line.text)} | ctx.defaults
+    rendered = _rendered_bodies(ctx.rendered, ctx.preamble, ctx.l1_names[0])
+    lines = set(list_items(rendered)) | {norm(default_idx(src)) for src in ctx.sources.values()}
+    return lines, set(item_pieces(rendered)) | ctx.defaults
 
 
-def _added(edited: Sequence[Edited], ctx: Context, out: Rescue) -> list[tuple[str, Seg]]:
+def _added(edited: Sequence[Edited], ctx: Context, out: Rescue) -> list[tuple[str, BodySegment]]:
     """Segments of the edited files that are neither in the fresh render nor a source's default
     line, first occurrence of each.
 
@@ -169,7 +174,7 @@ def _added(edited: Sequence[Edited], ctx: Context, out: Rescue) -> list[tuple[st
     joined or edited by hand) is compared segment by segment with the pieces of the generated lines.
     """
     whole, known = _generated(ctx)
-    added: list[tuple[str, Seg]] = []
+    added: list[tuple[str, BodySegment]] = []
     seen: set[str] = set()
     for ed in edited:
         lines = _body(ed, ctx, out)
@@ -195,8 +200,8 @@ def analyse(edited: Sequence[Edited], ctx: Context) -> Rescue:
     """
     out = Rescue()
     claimed: set[str] = set()
-    linked: list[tuple[str, Seg]] = []
-    unlinked: list[Seg] = []
+    linked: list[tuple[str, BodySegment]] = []
+    unlinked: list[BodySegment] = []
     for name, seg in _added(edited, ctx, out):
         links = memory_links(seg.text)
         refusal = _refusal(links, ctx, claimed) if links else None

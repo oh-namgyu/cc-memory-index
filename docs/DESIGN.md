@@ -70,6 +70,8 @@ metadata:
 * `idx` defaults to `[<name or file stem>](<file>) — <description>`.
 * `idx_section` defaults to the capitalised `type` (`Feedback`, `Project`, …) or `Other`.
 * `idx_order` defaults to 1,000,000; ties break on file name.
+* An absent `idx_section` or `idx_sub` means the same as an empty one, so this tool never writes
+  either key empty.
 
 ### 3.1 Parser (strict subset, no YAML library)
 
@@ -175,8 +177,11 @@ removed, and the result is stripped. Multi-line text such as a preamble is split
   resolve outside the root is ignored and reported.
 * A link is `[text](target)` on one line: no brackets in the text; no whitespace, brackets,
   parentheses or angle brackets in the target, which may be wrapped in `<` `>`. A `#fragment` is
-  dropped and a target with a URL scheme is never a memory file. Rescue, `migrate` and `lint` use
-  this one rule, matching in linear time on at most 64 KiB per line.
+  dropped and a target with a URL scheme is never a memory file. Nothing inside an inline code
+  span (a run of backticks up to the next run of the same length, within one line, as in
+  CommonMark) is a link. Rescue, `migrate` and `lint` use this one rule, matching in linear time
+  on at most 64 KiB per line. `lint` also ignores links and `[[wiki links]]` inside fenced code
+  blocks and HTML comments.
 
 ### 5.3 Limits
 
@@ -218,7 +223,8 @@ interrupted `--force` cannot push an older backup out).
 ### 6.1 Folding pending lines
 
 1. Write the rescued line to `.index-pending.json`.
-2. Patch the target's frontmatter (`idx`, `idx_section`, `idx_sub`, `idx_order`).
+2. Patch the target's frontmatter: `idx` and `idx_order`, and `idx_section` / `idx_sub` only
+   when not empty.
 3. Remove the entry from `.index-pending.json`.
 4. Render L0 and L1.
 
@@ -301,8 +307,8 @@ store, against concurrent editors that are not malicious, and against crashes.
   preamble. Every other line — paragraphs, indented list items, tables, block quotes, HTML, and
   every line of a fenced code block (fences included) or of an HTML comment that starts a line —
   is a *note*.
-* A segment of an index line linking to one source gives that source `tier: resident` and its
-  `idx`, `idx_section`, `idx_sub` and `idx_order`. Unlinked segments, and second and later
+* A segment of an index line linking to one source gives that source `tier: resident`, its
+  `idx` and `idx_order`, and the `idx_section` / `idx_sub` it appeared under (when not empty). Unlinked segments, and second and later
   segments pointing at the same source, become manual lines. Text before the first `## ` heading
   or top-level `- ` line becomes the manual preamble.
 * Notes are moved verbatim (each line byte for byte, LF endings) into one new memory file,

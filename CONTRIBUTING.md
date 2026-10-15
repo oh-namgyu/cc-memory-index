@@ -12,7 +12,8 @@
 - Every write goes through `StoreDir.replace` (or `remove`) with the fingerprint taken when the
   file was read. A new writing path needs a fault-injection test in `tests/test_faults*.py` showing
   that a failure at each of its writes, followed by a rerun, converges with nothing lost.
-- Memory content is untrusted. Text that reaches an index line goes through `text.sanitize`.
+- Memory content is untrusted. Text that reaches an index line goes through `text.sanitize`; a
+  message that quotes store content uses `text.quote`. Exit codes come from `result.py`.
 - [docs/DESIGN.md](docs/DESIGN.md) is the contract. Change it in the same pull request as the
   behaviour it describes.
 - Keep files under 300 lines and functions under 50 lines.

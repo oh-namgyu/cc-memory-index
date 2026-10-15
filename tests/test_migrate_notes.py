@@ -82,8 +82,6 @@ metadata:
   type: reference
   tier: resident
   idx: "[Notes moved from MEMORY.md](index-notes.md) — {WHAT}"
-  idx_section: ""
-  idx_sub: ""
   idx_order: 0
 ---
 # Notes moved from MEMORY.md

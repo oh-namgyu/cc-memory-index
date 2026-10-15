@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import errno
-import hashlib
 import os
 import stat
 import sys
 import time
-from typing import Iterable, Iterator
+from typing import Iterator
+
+from .safetypes import EntryKind
 
 if sys.platform == "win32":
     import msvcrt
@@ -41,7 +42,7 @@ DIR_FD = (
 )
 
 
-def kind_of(st: os.stat_result) -> str:
+def kind_of(st: os.stat_result) -> EntryKind:
     """'link' for symlinks and name-surrogate reparse points (junctions), else file/dir/other.
 
     Only name surrogates redirect a path elsewhere. Other reparse points, such as cloud-sync
@@ -76,16 +77,6 @@ def stream(fd: int, chunk: int, limit: int) -> Iterator[bytes]:
             return
         size += len(piece)
         yield piece
-
-
-def digest(pieces: Iterable[bytes]) -> tuple[int, str]:
-    """Total size and SHA-256 hex of a stream of pieces."""
-    h = hashlib.sha256()
-    size = 0
-    for piece in pieces:
-        h.update(piece)
-        size += len(piece)
-    return size, h.hexdigest()
 
 
 def try_lock(fd: int) -> bool:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import stat
@@ -10,7 +9,9 @@ from dataclasses import asdict, dataclass, fields
 from typing import AbstractSet, Mapping, Optional
 
 from .frontmatter import Frontmatter, parse
-from .safeio import Fingerprint, SafeIOError, StoreDir, TooLarge, UnsafeEntry
+from .jsonfile import JSONFileError, load_object
+from .safeio import Fingerprint, StoreDir, TooLarge, UnsafeEntry
+from .text import quote
 
 SOURCE_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\.md\Z")
 # Windows opens a device, not a file, for these names with any extension (CON.md is CON).
@@ -49,6 +50,11 @@ def valid_source_name(name: str) -> bool:
         and ".." not in name
         and name.split(".", 1)[0].upper() not in _DEVICE_NAMES
     )
+
+
+def valid_l1_name(name: object) -> bool:
+    """DESIGN §9: a valid source name other than MEMORY.md, in any case."""
+    return isinstance(name, str) and valid_source_name(name) and name.lower() != L0_NAME.lower()
 
 
 def _home(env: Mapping[str, str]) -> str:
@@ -147,15 +153,15 @@ def store_root_for_edit(file_path: str) -> Optional[str]:
 
 def _check_field(key: str, value: object) -> None:
     if key == "l1_name":
-        if not isinstance(value, str) or not valid_source_name(value) or value.lower() == L0_NAME.lower():
-            raise ConfigError(f"l1_name must be a valid source name other than {L0_NAME}, not {value!r}")
+        if not valid_l1_name(value):
+            raise ConfigError(f"l1_name must be a valid source name other than {L0_NAME}, not {quote(value)}")
         return
     low, high = _RANGES[key]
     kinds = (int, float) if key == "lock_timeout_s" else (int,)
     if isinstance(value, bool) or not isinstance(value, kinds):
-        raise ConfigError(f"{key} must be {'a number' if float in kinds else 'an integer'}, not {value!r}")
+        raise ConfigError(f"{key} must be {'a number' if float in kinds else 'an integer'}, not {quote(value)}")
     if not low <= value <= high:
-        raise ConfigError(f"{key} must be between {low} and {high}, not {value!r}")
+        raise ConfigError(f"{key} must be between {low} and {high}, not {quote(value)}")
 
 
 @dataclass(frozen=True)
@@ -171,31 +177,17 @@ class Config:
             _check_field(key, value)
 
 
-def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    obj: dict[str, object] = {}
-    for key, value in pairs:
-        if key in obj:
-            raise ValueError(f"duplicate key {key!r}")
-        obj[key] = value
-    return obj
-
-
 def load_config(sd: StoreDir) -> Config:
     """Config from .memory-index.json in the store, or the defaults when it is absent."""
-    if sd.kind(CONFIG_NAME) == "missing":
-        return Config()
     try:
-        data, _ = sd.read(CONFIG_NAME, CONFIG_MAX_BYTES)
-        obj = json.loads(data.decode("utf-8-sig"), object_pairs_hook=reject_duplicates)
-    except SafeIOError as e:
-        raise ConfigError(f"cannot read {CONFIG_NAME}: {e}") from e
-    except (ValueError, RecursionError) as e:
-        raise ConfigError(f"{CONFIG_NAME} is not valid JSON: {e}") from e
-    if not isinstance(obj, dict):
-        raise ConfigError(f"{CONFIG_NAME} must contain a JSON object")
+        obj, _ = load_object(sd, CONFIG_NAME, CONFIG_MAX_BYTES)
+    except JSONFileError as e:
+        raise ConfigError(str(e)) from e
+    if obj is None:
+        return Config()
     unknown = sorted(set(obj) - {f.name for f in fields(Config)})
     if unknown:
-        raise ConfigError(f"unknown key(s) in {CONFIG_NAME}: {', '.join(unknown)}")
+        raise ConfigError(f"unknown key(s) in {CONFIG_NAME}: {', '.join(map(quote, unknown))}")
     return Config(**obj)
 
 

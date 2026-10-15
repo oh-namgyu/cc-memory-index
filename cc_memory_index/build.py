@@ -2,88 +2,30 @@
 
 from __future__ import annotations
 
-import contextlib
-from dataclasses import dataclass, field
-from typing import AbstractSet, Any, Iterator, Optional, Sequence
+from typing import AbstractSet, Optional, Sequence
 
 from .fold import Folded, fold
-from .generated import as_text, backup_generated, edited_generated_files, known_lines, record_bytes
-from .items import MANUAL_NAME, PENDING_NAME, DataFileError
-from .plan import USAGE_ERROR, Plan, Refusal, prepare, rerender
-from .render import BudgetError, RenderInvariant
+from .generated import Current, Role, as_text, backup_generated, edited_generated_files, known_lines, record_bytes
+from .items import MANUAL_NAME, PENDING_NAME
+from .plan import Plan, prepare, rerender
+from .render import RenderInvariant
 from .rescue import Context, Edited, Rescue, analyse, body_pieces, default_pieces, lost
-from .safeio import ConcurrentEdit, LockTimeout, RootChanged, StoreDir, TooLarge, UnsafeEntry
-from .segments import pieces
-from .store import RENDER_MARK, Config, ConfigError, load_config
-
-EXIT_OK = 0
-EXIT_OVERFLOW = 1
-EXIT_OUT_OF_SYNC = 1
-EXIT_USAGE = USAGE_ERROR
-EXIT_EDITED = 3
-EXIT_CONCURRENT = 4
-EXIT_LOCK = 5
-EXIT_IO = 6
-EXIT_PARSE = 7
-EXIT_INVARIANT = 8
-_FAILURES: tuple[tuple[tuple[type[BaseException], ...], int, str], ...] = (
-    ((ConcurrentEdit,), EXIT_CONCURRENT, "edited concurrently, run again: "),
-    ((LockTimeout,), EXIT_LOCK, ""),
-    ((RenderInvariant,), EXIT_INVARIANT, "internal invariant violated, nothing written: "),
-    ((ConfigError, DataFileError, BudgetError, UnsafeEntry, TooLarge), EXIT_USAGE, ""),
-    ((OSError, RootChanged), EXIT_IO, "I/O error, the store is still valid; run again: "),
+from .result import (
+    EXIT_ATTENTION, EXIT_CONCURRENT, EXIT_OK, EXIT_PARSE, EXIT_UNRESCUABLE, EXIT_USAGE, BuildResult, Refusal,
+    new_result, outcome, writing,
 )
-_HANDLED: tuple[type[BaseException], ...] = tuple(cls for classes, _, _ in _FAILURES for cls in classes)
-
-
-@dataclass
-class BuildResult:
-    code: int
-    messages: list[str] = field(default_factory=list)
-    stats: dict[str, Any] = field(default_factory=dict)
-
-
-def new_result() -> BuildResult:
-    """The result of a build before it runs: nothing rescued, kept as manual lines or refused yet."""
-    return BuildResult(EXIT_OK, stats={"rescued": [], "manual_added": [], "unrescuable": []})
-
-
-@contextlib.contextmanager
-def writing(sd: StoreDir, timeout_s: float, stats: dict[str, Any]) -> Iterator[None]:
-    """Hold the store lock for a command that writes, after removing the temporary files that a
-    killed write left behind (DESIGN §7.1, §7.4); stats['temp_removed'] counts them."""
-    with sd.lock(timeout_s):
-        stats["temp_removed"] = sd.sweep_temp()
-        yield
-
-
-def swept(*results: BuildResult) -> int:
-    """How many temporary files the commands behind results removed, together."""
-    return sum(int(r.stats.get("temp_removed", 0)) for r in results)
-
-
-@contextlib.contextmanager
-def outcome(res: BuildResult) -> Iterator[None]:
-    """Turn every expected failure into its exit code and one message (DESIGN §10)."""
-    try:
-        yield
-    except Refusal as e:
-        res.code = e.code
-        res.messages.append(str(e))
-    except _HANDLED as e:
-        for classes, code, prefix in _FAILURES:
-            if isinstance(e, classes):
-                res.code = code
-                res.messages.append(f"{prefix}{e}")
-                return
+from .safeio import StoreDir
+from .segments import pieces
+from .store import RENDER_MARK, Config, load_config
+from .text import quote
 
 
 def _edited(plan: Plan, res: BuildResult) -> list[Edited]:
     """The generated files whose content differs from what this tool wrote (DESIGN §6)."""
     if plan.record.data is not None and plan.parsed is None:
         res.messages.append(f"{RENDER_MARK} is malformed: the generated files are treated as possibly edited")
-    current = {"l0": plan.l0, "l1": plan.l1}
-    fresh = {"l0": plan.rendered.l0, "l1": plan.rendered.l1}
+    current: dict[Role, Current] = {"l0": plan.l0, "l1": plan.l1}
+    fresh: dict[Role, str] = {"l0": plan.rendered.l0, "l1": plan.rendered.l1}
     roles = edited_generated_files(plan.parsed, current, fresh, known_lines(plan.inputs.data.manual.preamble))
     return [Edited(current[role].name, role, as_text(current[role].data)) for role in roles]
 
@@ -115,17 +57,17 @@ def _rescue(plan: Plan, cfg: Config, edited: Sequence[Edited], moved: AbstractSe
     res.stats["unrescuable"] = [{"segment": u.segment, "reason": u.reason, "kind": u.kind} for u in found.unrescuable]
     if found.unrescuable:
         for u in found.unrescuable:
-            where = f"{u.file}: {u.segment[:100]!r}" if u.segment else u.file
+            where = f"{u.file}: {quote(u.segment, 100)}" if u.segment else u.file
             res.messages.append(f"{where} — {u.reason}")
         names = ", ".join(ed.name for ed in edited)
-        raise Refusal(EXIT_EDITED, (
+        raise Refusal(EXIT_UNRESCUABLE, (
             f"nothing written: {len(found.unrescuable)} hand edit(s) of {names} cannot be kept; fix them as"
             " described above, or run `build --force` to back up the generated files and regenerate them"
         ))
     res.stats["rescued"] = [{"file": e.file, "idx": e.idx} for e in found.entries]
     res.stats["manual_added"] = [line.seg for line in found.lines]
     res.messages.extend(f"moved a line added by hand into {e.file} (metadata.idx)" for e in found.entries)
-    res.messages.extend(f"kept a line added by hand as a manual line ({MANUAL_NAME}): {line.seg[:80]!r}"
+    res.messages.extend(f"kept a line added by hand as a manual line ({MANUAL_NAME}): {quote(line.seg)}"
                         for line in found.lines)
     return found
 
@@ -142,14 +84,15 @@ def _check_kept(old: Plan, new: Plan, cfg: Config, rescue: Rescue, edited: Seque
     generated = {p for it in old.items if it.file in changed for p in pieces(it.idx)}
     generated |= default_pieces(old.inputs.scanned.sources) | moved
     roles = {ed.role for ed in edited}
+    files: tuple[tuple[Role, Current], ...] = (("l0", old.l0), ("l1", old.l1))
     current = [(as_text(cur.data), rescue.pieces.get(role) if role in roles else None)
-               for role, cur in (("l0", old.l0), ("l1", old.l1)) if not (force and role in roles)]
+               for role, cur in files if not (force and role in roles)]
     fresh = body_pieces(old.rendered, old.inputs.data.manual.preamble, cfg.l1_name)
     after = body_pieces(new.rendered, new.inputs.data.manual.preamble, cfg.l1_name)
     missing = lost(current, fresh, after, generated)
     if missing:
         raise RenderInvariant(
-            f"{len(missing)} line(s) of the generated files would be lost (first: {missing[0][:80]!r});"
+            f"{len(missing)} line(s) of the generated files would be lost (first: {quote(missing[0])});"
             " they were not rewritten"
         )
 
@@ -205,7 +148,7 @@ def _finish(plan: Plan, folded: Folded, res: BuildResult) -> None:
             f" rescued line stays in {PENDING_NAME} for now"
         )
     elif plan.rendered.overflow:
-        res.code = EXIT_OVERFLOW
+        res.code = EXIT_ATTENTION
     elif plan.parse_failed:
         res.code = EXIT_PARSE
 
@@ -243,11 +186,11 @@ def run_check(store_path: str) -> BuildResult:
     """Render without writing and compare with the files on disk; no lock."""
     res = BuildResult(EXIT_OK)
     with outcome(res), StoreDir(store_path) as sd:
-        plan = prepare(sd, load_config(sd), EXIT_OUT_OF_SYNC, res.stats, res.messages)
+        plan = prepare(sd, load_config(sd), EXIT_ATTENTION, res.stats, res.messages)
         stale = out_of_sync(plan)
         res.stats["out_of_sync"] = stale
         if stale:
-            res.code = EXIT_OUT_OF_SYNC
+            res.code = EXIT_ATTENTION
         elif plan.parse_failed:
             res.code = EXIT_PARSE
     return res

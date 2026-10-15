@@ -13,33 +13,34 @@
 from __future__ import annotations
 
 import contextlib
-from typing import AbstractSet, Any, Iterator, Optional, Sequence
+from typing import AbstractSet, Iterator, Optional, Sequence
 
-from .build import (
-    EXIT_CONCURRENT, EXIT_INVARIANT, EXIT_OK, EXIT_OVERFLOW, EXIT_PARSE, EXIT_USAGE, BuildResult, build_locked,
-    new_result, outcome, writing,
-)
+from .build import build_locked
 from .generated import MIGRATING_MARK, Current, as_text, needs_migration, read_current
 from .items import MANUAL_NAME, PENDING_NAME, load_manual, load_pending
 from .links import memory_links
 from .migrate_notes import first_missing, notes_name
-from .migrate_plan import Plan, make_plan, manual_file, missing_segments, preview, render_store
+from .migrate_plan import MigrationPlan, make_plan, manual_file, missing_segments, preview
 from .migrate_snapshot import MARKER_MAX_BYTES, SNAPSHOT_PREFIX, Snapshot, marker_ident, new_snapshot_id
 from .migrate_snapshot import restore as restore_snapshot
-from .plan import Refusal
-from .render import Rendered, nbytes
+from .plan import render_store
+from .render import Rendered
+from .result import (
+    EXIT_ATTENTION, EXIT_CONCURRENT, EXIT_INVARIANT, EXIT_OK, EXIT_PARSE, EXIT_USAGE, BuildResult, Converted, Refusal,
+    Stats, budget_line, budget_stats, new_result, outcome, writing,
+)
 from .safeio import ConcurrentEdit, Fingerprint, StoreDir
 from .segments import body_lines, pieces
 from .store import CONFIG_NAME, L0_NAME, RENDER_MARK, SOURCE_MAX_BYTES, Config, ScanResult, Source, load_config, scan
+from .text import quote
 
-EXIT_INCOMPLETE = 1
 RERUN = "run `cc-memory-index migrate --apply` again"
 ALREADY = "this store already uses the generated index: nothing to migrate"
 UNBUILT = ("nothing to migrate: MEMORY.md holds no hand-written index (or this store was migrated already),"
            " but the index was never built")
 
 
-def _format_state(sd: StoreDir) -> Optional[str]:
+def _format_state(sd: StoreDir) -> Optional[Converted]:
     """'built', 'unbuilt' or None for a hand-written store (DESIGN §8).
 
     Only files that this tool writes decide it, the same way build does (generated.needs_migration):
@@ -54,16 +55,16 @@ def _format_state(sd: StoreDir) -> Optional[str]:
     return None if needs_migration(read_current(sd, L0_NAME).data, False, has_manual) else "unbuilt"
 
 
-def _require_all(plan: Plan, rendered: Rendered, notes: Optional[str], code: int, hint: str) -> None:
+def _require_all(plan: MigrationPlan, rendered: Rendered, notes: Optional[str], code: int, hint: str) -> None:
     """DESIGN §8: every original segment is in L0 or L1, and every note is in notes (the text of the
     notes file), in order."""
     missing = missing_segments(plan.index.segments, rendered)
     if missing:
-        shown = "; ".join(repr(text[:80]) for text in missing[:10])
+        shown = "; ".join(quote(text) for text in missing[:10])
         raise Refusal(code, f"{len(missing)} line(s) of {L0_NAME} would not be in the index ({shown}): {hint}")
     note = first_missing(plan.index.notes.lines, notes)
     if note is not None:
-        raise Refusal(code, f"the {L0_NAME} line {note[:80]!r} would not be in {plan.notes_name}: {hint}")
+        raise Refusal(code, f"the {L0_NAME} line {quote(note)} would not be in {plan.notes_name}: {hint}")
 
 
 def _notes_name(sd: StoreDir, cfg: Config, text: str, created: Optional[str]) -> str:
@@ -75,7 +76,7 @@ def _notes_name(sd: StoreDir, cfg: Config, text: str, created: Optional[str]) ->
 
 
 def _checked_plan(sd: StoreDir, cfg: Config, scanned: ScanResult, index: Optional[bytes],
-                  created: Optional[str] = None) -> tuple[Plan, Rendered]:
+                  created: Optional[str] = None) -> tuple[MigrationPlan, Rendered]:
     """The plan for index (the original MEMORY.md) and its in-memory render; refuses a lossy plan.
     created is the notes file a snapshot already recorded."""
     text = "" if index is None else as_text(index)
@@ -93,28 +94,24 @@ def _checked_plan(sd: StoreDir, cfg: Config, scanned: ScanResult, index: Optiona
     return plan, rendered
 
 
-def _describe(plan: Plan, rendered: Rendered, cfg: Config, sources: Sequence[Source]) -> dict[str, Any]:
+def _describe(plan: MigrationPlan, rendered: Rendered, cfg: Config, sources: Sequence[Source]) -> Stats:
     resident = set(plan.resident)
-    return {
+    stats: Stats = {
         "resident": len(plan.resident),
         "manual": len(plan.manual),
         "untouched": sum(1 for src in sources if src.name not in resident and src.name != plan.notes_name),
         "notes": len(plan.index.notes.lines),
         "notes_file": plan.notes_name,
         "frontmatter_changes": len(plan.texts),
-        "l0_bytes": nbytes(rendered.l0),
-        "l0_lines": rendered.l0.count("\n"),
-        "budget_bytes": cfg.budget_bytes,
-        "budget_lines": cfg.budget_lines,
-        "overflow": len(rendered.overflow),
-        "l1_name": cfg.l1_name,
     }
+    stats.update(budget_stats(rendered, cfg))
+    return stats
 
 
 def _dry_run(sd: StoreDir, cfg: Config, res: BuildResult) -> None:
     res.stats["mode"] = "dry run"
     if sd.kind(MIGRATING_MARK) != "missing":
-        raise Refusal(EXIT_INCOMPLETE, f"{MIGRATING_MARK} exists: a migration was interrupted; {RERUN}")
+        raise Refusal(EXIT_ATTENTION, f"{MIGRATING_MARK} exists: a migration was interrupted; {RERUN}")
     state = _format_state(sd)
     if state is not None:
         res.stats["already"] = state
@@ -136,7 +133,7 @@ def _originals(sd: StoreDir, cfg: Config, scanned: ScanResult, read: tuple[Curre
     return found
 
 
-def _write(sd: StoreDir, cfg: Config, snapshot: Snapshot, scanned: ScanResult) -> Plan:
+def _write(sd: StoreDir, cfg: Config, snapshot: Snapshot, scanned: ScanResult) -> MigrationPlan:
     """Snapshot and manifest, then .index-manual.json, the notes file, and one memory file at a time.
 
     The original MEMORY.md is the snapshot's copy once the manifest exists; until then nothing
@@ -184,7 +181,7 @@ def _start(sd: StoreDir, cfg: Config, scanned: ScanResult, res: BuildResult) -> 
     return ident, sd.replace(MIGRATING_MARK, f"{ident}\n".encode("ascii"), None)
 
 
-def _moved(plan: Plan) -> frozenset[str]:
+def _moved(plan: MigrationPlan) -> frozenset[str]:
     """The notes as the rescue reads MEMORY.md, in pieces (DESIGN §6): moved, not added by hand."""
     return frozenset(p for line in body_lines(plan.index.notes.lines, False) for p in pieces(line.text))
 
@@ -196,7 +193,7 @@ def _build(sd: StoreDir, cfg: Config, res: BuildResult, moved: Optional[Abstract
         build_locked(sd, cfg, built, moved=moved)
     res.messages.extend(built.messages)
     res.stats["build"] = built.stats
-    if built.code not in (EXIT_OK, EXIT_OVERFLOW, EXIT_PARSE):
+    if built.code not in (EXIT_OK, EXIT_ATTENTION, EXIT_PARSE):
         raise Refusal(built.code, f"the memory files are migrated but the index was not written: fix the above,"
                                   f" then {RERUN}")
     res.code = EXIT_PARSE if built.code == EXIT_PARSE else EXIT_OK
@@ -218,10 +215,10 @@ def _apply(sd: StoreDir, cfg: Config, res: BuildResult) -> None:
         plan = _write(sd, cfg, Snapshot(snap, ident), scanned)
     res.messages.extend(plan.messages)
     fresh = scan(sd, cfg)
-    rendered = render_store(fresh.sources, load_manual(sd), load_pending(sd), cfg)
+    _, rendered = render_store(fresh.sources, load_manual(sd), load_pending(sd), cfg)
     undo = f"{MIGRATING_MARK} is kept; undo with `cc-memory-index migrate --restore {ident}`"
     notes = None if plan.notes_name is None else as_text(read_current(sd, plan.notes_name).data)
-    _require_all(plan, rendered, notes, EXIT_INCOMPLETE, undo)
+    _require_all(plan, rendered, notes, EXIT_ATTENTION, undo)
     res.stats.update(_describe(plan, rendered, cfg, fresh.sources))
     _build(sd, cfg, res, _moved(plan))
     sd.remove(MIGRATING_MARK, marker_fp)
@@ -265,8 +262,7 @@ def summary(res: BuildResult) -> list[str]:
         lines += [
             f"migrate{' (dry run)' if dry else ''}: {s['resident']} memory files resident, {s['manual']} manual lines,"
             f" {s['untouched']} memory files listed only in {s['l1_name']}",
-            f"{L0_NAME}: {s['l0_bytes']:,} of {s['budget_bytes']:,} bytes, {s['l0_lines']} of {s['budget_lines']}"
-            f" lines; overflow {s['overflow']}",
+            budget_line(s),
         ]
         if s["notes"]:
             lines.append(f"{s['notes']} line(s) that are not index lines (code blocks, nested lists, paragraphs)"

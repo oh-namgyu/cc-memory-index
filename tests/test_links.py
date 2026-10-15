@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 import pytest
-from storekit import append, built_store, make_store, write_index, write_memory
+from storekit import append, built_store, make_store, write_index, write_json, write_memory
 
 from cc_memory_index.build import run_build
 from cc_memory_index.frontmatter import parse
@@ -26,10 +26,24 @@ def test_one_rule_for_links(text: str, links: list[str]) -> None:
     assert memory_links(text) == links
 
 
+@pytest.mark.parametrize("text, links", [
+    ("`[x](x.md)` [y](y.md)", ["y.md"]),
+    ("[Run `make`](build.md) — [a]`x`(b.md)", ["build.md"]),
+    ("``code ` [x](x.md) `` and ` unmatched [z](z.md)", ["z.md"]),
+    ("```[x](x.md)``` `` [y](y.md)", ["y.md"]),
+])
+def test_nothing_inside_an_inline_code_span_is_a_link(text: str, links: list[str]) -> None:
+    """CommonMark: a run of n backticks opens a code span closed by the next run of exactly n; a run
+    without one is literal. Link text may hold code, but code holds no link."""
+    assert memory_links(text) == links
+
+
 # Short ids: pytest puts the test id in an environment variable, which Windows caps at 32,767 characters.
 @pytest.mark.parametrize("line", [
     "[" * 400_000, "[a](" * 100_000, "[a]([" * 80_000, "](" * 200_000, "[" + "x" * 400_000, "[x]" * 130_000,
-], ids=["brackets", "open-targets", "nested-open", "close-open", "open-text", "bare-labels"])
+    "".join("`" * n + " " for n in range(1, 900)), "`" * 400_000, "`x" * 200_000,
+], ids=["brackets", "open-targets", "nested-open", "close-open", "open-text", "bare-labels", "tick-runs", "ticks",
+        "tick-pairs"])
 def test_link_extraction_is_linear(line: str) -> None:
     start = time.perf_counter()
     memory_links("- " + line + "\n" + line)
@@ -38,6 +52,18 @@ def test_link_extraction_is_linear(line: str) -> None:
 
 def test_each_line_is_read_up_to_its_cap() -> None:
     assert memory_links("x" * LINE_MAX_CHARS + "[a](a.md)\n[b](b.md)") == ["b.md"]
+
+
+def test_a_link_inside_code_is_text_to_the_rescue_and_to_lint(tmp_path: Path) -> None:
+    root = built_store(tmp_path)
+    append(root, L0, "- write `[name](missing.md)` to link a memory\n")
+    res = run_build(str(root), False)
+    assert res.code == 0 and res.stats["manual_added"] == ["write `[name](missing.md)` to link a memory"]
+    preamble = "# Memory\n\n```\n[x](gone.md)\n```\n`[y](gone.md)` and [z](lost.md)"
+    write_json(root, ".index-manual.json", {"version": 1, "preamble": preamble, "lines": []})
+    assert run_build(str(root), False).code == 0
+    errors = [m for m in run_lint(str(root)).messages if m.startswith("error: ")]
+    assert errors == ["error: MEMORY.md links to lost.md, which does not exist"]
 
 
 def _dir(base: Path, name: str) -> Path:

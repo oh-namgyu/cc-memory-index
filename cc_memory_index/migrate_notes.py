@@ -9,47 +9,12 @@ memory file, under the headings they appeared under, so that no structure is tur
 from __future__ import annotations
 
 import itertools
-import re
 from typing import Callable, Optional, Sequence
 
 NOTES_STEM = "index-notes"
 NOTES_TITLE = "# Notes moved from MEMORY.md"
 _WHAT = "code blocks, nested lists and paragraphs that were not index lines"
 NOTES_DESCRIPTION = f"Text moved out of MEMORY.md by cc-memory-index migrate — {_WHAT}"
-_FENCE = re.compile(r"[ \t]*(`{3,}|~{3,})(.*)\Z")
-_COMMENT_OPEN = "<!--"
-_COMMENT_CLOSE = "-->"
-
-
-class Verbatim:
-    """Fenced code blocks (``` or ~~~, at any indentation) and HTML comments that start a line.
-
-    They hold no index lines: a '- ' or '## ' line inside them is code or commented out. A block
-    that is never closed runs to the end of the file, as in CommonMark.
-    """
-
-    def __init__(self) -> None:
-        self._fence = ""
-        self._comment = False
-
-    def inside(self, line: str) -> bool:
-        """True when line opens, continues or closes such a block."""
-        if self._comment:
-            self._comment = _COMMENT_CLOSE not in line
-            return True
-        m = _FENCE.match(line)
-        if self._fence:
-            if m and m.group(1)[0] == self._fence[0] and len(m.group(1)) >= len(self._fence) and not m.group(2).strip():
-                self._fence = ""
-            return True
-        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-            self._fence = m.group(1)
-            return True
-        rest = line.lstrip(" \t")
-        if rest.startswith(_COMMENT_OPEN):
-            self._comment = _COMMENT_CLOSE not in rest[len(_COMMENT_OPEN):]
-            return self._comment
-        return False
 
 
 class Notes:
@@ -94,8 +59,7 @@ def notes_text(name: str, body: Sequence[str]) -> str:
     """The notes file: frontmatter making it a resident reference memory, a title, then body."""
     idx = f"[Notes moved from MEMORY.md]({name}) — {_WHAT}"
     head = ["---", f"name: {name[: -len('.md')]}", f"description: {NOTES_DESCRIPTION}", "metadata:",
-            "  type: reference", "  tier: resident", f'  idx: "{idx}"', '  idx_section: ""', '  idx_sub: ""',
-            "  idx_order: 0", "---", NOTES_TITLE]
+            "  type: reference", "  tier: resident", f'  idx: "{idx}"', "  idx_order: 0", "---", NOTES_TITLE]
     return "\n".join(head + list(body)) + "\n"
 
 

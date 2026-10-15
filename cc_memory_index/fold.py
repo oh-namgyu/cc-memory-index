@@ -9,24 +9,16 @@ between two writes leaves a valid store and the next build finishes the job.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping, Optional, Sequence, Union
+from typing import Mapping, Sequence, Union
 
 from .frontmatter import PatchError, patch_checked
-from .items import MANUAL_NAME, PENDING_NAME, Manual, ManualLine, PendingEntry, manual_bytes, pending_bytes
-from .safeio import ConcurrentEdit, Fingerprint, StoreDir, UnsafeEntry
+from .items import (
+    MANUAL_NAME, PENDING_NAME, DataFiles, Manual, ManualLine, PendingEntry, explicit_idx, manual_bytes, pending_bytes,
+)
+from .safeio import ConcurrentEdit, StoreDir, UnsafeEntry
 from .segments import norm
 from .store import Source
 from .text import sanitize
-
-
-@dataclass
-class DataFiles:
-    """.index-manual.json and .index-pending.json as read under the lock (fp None: absent)."""
-
-    manual: Manual
-    manual_fp: Optional[Fingerprint]
-    pending: list[PendingEntry]
-    pending_fp: Optional[Fingerprint]
 
 
 @dataclass
@@ -44,11 +36,13 @@ class Folded:
 
 
 def folded_text(src: Source, entry: PendingEntry) -> str:
-    """src's text with the entry's idx, section, sub and order added to its frontmatter (DESIGN §6.1
-    step 2). PatchError when that cannot be done safely or would not give the file this idx."""
-    add: dict[str, Union[str, int]] = {
-        "idx": entry.idx, "idx_section": entry.section, "idx_sub": entry.sub, "idx_order": entry.order,
-    }
+    """src's text with the entry's idx and order added to its frontmatter, and its section and sub
+    unless they are empty, which an absent key means too (DESIGN §6.1 step 2). PatchError when that
+    cannot be done safely or would not give the file this idx."""
+    add: dict[str, Union[str, int]] = {"idx": entry.idx}
+    headings = (("idx_section", entry.section), ("idx_sub", entry.sub))
+    add.update((key, value) for key, value in headings if sanitize(value))
+    add["idx_order"] = entry.order
     return patch_checked(src.text, add, check=("idx",))
 
 
@@ -74,7 +68,7 @@ def _fold_entries(
 ) -> list[PendingEntry]:
     """(c): the entries to keep. An entry equal to its file's idx is folded already and dropped;
     the first entry for a file without idx is patched in; every other entry is kept (DESIGN §6.2)."""
-    idx_of = {name: sanitize(src.fm.get("idx") or "") for name, src in sources.items()}
+    idx_of = {name: explicit_idx(src) for name, src in sources.items()}
     keep: list[PendingEntry] = []
     for entry in pending:
         current = idx_of.get(entry.file)

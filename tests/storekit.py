@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -34,14 +33,13 @@ def memory_text(body: str = "body\n", /, **meta: Union[str, int]) -> str:
 
 def source(file: str, /, **meta: Union[str, int]) -> Source:
     text = memory_text(**meta)
-    data = text.encode()
-    return Source(file, text, Fingerprint(len(data), hashlib.sha256(data).hexdigest()), parse(text))
+    return Source(file, text, Fingerprint.of(text.encode()), parse(text))
 
 
 def item(idx: str, section: str = "S", sub: str = "", order: int = 0, file: Optional[str] = None,
          resident: bool = True, origin: str = "source") -> Item:
     if file is None and origin != "manual":
-        file = hashlib.sha256(idx.encode()).hexdigest()[:12] + ".md"
+        file = Fingerprint.of(idx.encode()).sha256[:12] + ".md"
     return Item(file, idx, section, sub, order, resident, origin)
 
 

@@ -131,6 +131,28 @@ def test_wiki_links_exact_variant_and_missing(tmp_path: Path) -> None:
     assert "links.md: wiki link 'Build_Cmds' matches build-cmds.md only when case and '-'/'_' are ignored" in warnings
 
 
+@pytest.mark.parametrize("body", [
+    "타입드 위키링크 `rel::[[target]]` 3종\n",
+    "``a ` [[target]] ``\n",
+    "```text\n[[target]]\n```\n",
+    "  ~~~\n  [[target]]\n\n  ~~~\n",
+], ids=["inline", "double-ticks", "backtick-fence", "tilde-fence"])
+def test_wiki_links_inside_code_are_not_checked(tmp_path: Path, body: str) -> None:
+    root = clean_store(tmp_path)
+    (root / "code.md").write_text(memory_text(body, name="code"), encoding="utf-8")
+    code, errors, _ = _lint(_built(root))
+    assert (code, errors) == (0, [])
+
+
+def test_wiki_links_outside_code_are_still_checked(tmp_path: Path) -> None:
+    root = clean_store(tmp_path)
+    body = "`[[in-code]]` [[outside]] `` no closer [[after-ticks]]\n```\n[[in-fence]]\n```\n[[after-fence]]\n"
+    (root / "code.md").write_text(memory_text(body, name="code"), encoding="utf-8")
+    code, errors, _ = _lint(_built(root))
+    assert code == 1 and errors == [f"code.md: wiki link {target!r} does not resolve to any memory file"
+                                    for target in ("outside", "after-ticks", "after-fence")]
+
+
 def test_warnings_for_names_oversized_idx_bad_names_and_no_frontmatter(tmp_path: Path) -> None:
     root = clean_store(tmp_path)
     write_memory(root, "long.md", name="long", tier="resident", idx="[long](long.md) — " + "y" * 1100)

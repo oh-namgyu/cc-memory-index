@@ -15,11 +15,12 @@ import dataclasses
 import json
 import re
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Literal, Optional, Sequence
 
-from .safeio import Fingerprint, SafeIOError, StoreDir
-from .store import Source, reject_duplicates, valid_source_name
-from .text import normalize_ws, sanitize
+from .jsonfile import JSONFileError, load_object
+from .safeio import Fingerprint, StoreDir
+from .store import Source, valid_source_name
+from .text import normalize_ws, quote, sanitize
 
 MANUAL_NAME = ".index-manual.json"
 PENDING_NAME = ".index-pending.json"
@@ -34,6 +35,7 @@ _MANUAL_KEYS = ("version", "preamble", "lines")
 _LINE_KEYS = ("seg", "section", "sub", "order")
 _PENDING_KEYS = ("version", "entries")
 _ENTRY_KEYS = ("file", "idx", "section", "sub", "order")
+Origin = Literal["source", "manual", "pending"]
 
 
 class DataFileError(Exception):
@@ -48,7 +50,7 @@ class Item:
     sub: str
     order: int
     resident: bool
-    origin: str
+    origin: Origin
 
 
 @dataclass(frozen=True)
@@ -74,20 +76,22 @@ class PendingEntry:
     order: int
 
 
+@dataclass
+class DataFiles:
+    """.index-manual.json and .index-pending.json as read under the lock (fp None: absent)."""
+
+    manual: Manual
+    manual_fp: Optional[Fingerprint]
+    pending: list[PendingEntry]
+    pending_fp: Optional[Fingerprint]
+
+
 def _read_object(sd: StoreDir, name: str) -> tuple[Optional[dict[str, object]], Optional[Fingerprint]]:
     """Strict JSON object from a store data file and its fingerprint; (None, None) when absent."""
-    if sd.kind(name) == "missing":
-        return None, None
     try:
-        data, fp = sd.read(name, DATA_MAX_BYTES)
-        obj = json.loads(data.decode("utf-8-sig"), object_pairs_hook=reject_duplicates)
-    except SafeIOError as e:
-        raise DataFileError(f"cannot read {name}: {e}") from e
-    except (ValueError, RecursionError) as e:
-        raise DataFileError(f"{name} is not valid JSON: {e}") from e
-    if not isinstance(obj, dict):
-        raise DataFileError(f"{name} must contain a JSON object")
-    return obj, fp
+        return load_object(sd, name, DATA_MAX_BYTES)
+    except JSONFileError as e:
+        raise DataFileError(str(e)) from e
 
 
 def _fields(obj: object, keys: tuple[str, ...], where: str) -> dict[str, object]:
@@ -120,7 +124,7 @@ def _entries(obj: dict[str, object], name: str, keys: tuple[str, ...], list_key:
     _fields(obj, keys, name)
     version = obj["version"]
     if type(version) is not int or version != DATA_VERSION:
-        raise DataFileError(f"{name}: unsupported version {version!r} (expected {DATA_VERSION})")
+        raise DataFileError(f"{name}: unsupported version {quote(version)} (expected {DATA_VERSION})")
     entries = obj[list_key]
     if not isinstance(entries, list):
         raise DataFileError(f"{name}: '{list_key}' must be a list")
@@ -171,7 +175,7 @@ def _pending(obj: dict[str, object]) -> list[PendingEntry]:
         entry = _fields(raw, _ENTRY_KEYS, where)
         file = _text(entry, "file", where, True)
         if not valid_source_name(file):
-            raise DataFileError(f"{where}.file is not a valid source name: {file!r}")
+            raise DataFileError(f"{where}.file is not a valid source name: {quote(file)}")
         out.append(PendingEntry(
             file,
             _text(entry, "idx", where, True),
@@ -201,6 +205,11 @@ def _value(src: Source, key: str) -> str:
     return sanitize(src.fm.get(key) or "")
 
 
+def explicit_idx(src: Source) -> str:
+    """The idx that src's frontmatter sets, sanitised; '' when it sets none."""
+    return _value(src, "idx")
+
+
 def default_idx(src: Source) -> str:
     """The line of a source without idx (DESIGN §3): [name or stem](file) — description."""
     name = _value(src, "name") or src.name[: -len(".md")]
@@ -220,12 +229,12 @@ def _source_order(src: Source, problems: list[str]) -> int:
         return DEFAULT_ORDER
     if _ORDER_TEXT.match(raw.strip()):
         return int(raw.strip())
-    problems.append(f"{src.name}: idx_order {raw[:40]!r} is not an integer; using {DEFAULT_ORDER:,}")
+    problems.append(f"{src.name}: idx_order {quote(raw, 40)} is not an integer; using {DEFAULT_ORDER:,}")
     return DEFAULT_ORDER
 
 
 def _source_item(src: Source, pending: Optional[PendingEntry], problems: list[str]) -> Item:
-    explicit = _value(src, "idx")
+    explicit = explicit_idx(src)
     resident = _value(src, "tier") == RESIDENT
     if pending is not None and not explicit:
         section = sanitize(pending.section) or _type_section(src)
@@ -276,3 +285,4 @@ def manual_items(manual: Manual) -> list[Item]:
              True, "manual")
         for line in manual.lines
     ]
+

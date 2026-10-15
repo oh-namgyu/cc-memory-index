@@ -249,7 +249,7 @@ def test_sources_that_cannot_take_the_line(tmp_path: Path) -> None:
     assert res.code == 7, res.messages
     assert _meta(root, "diff.md") == {"idx": "the file's own line"}
     assert _meta(root, "equal.md") == {"idx": "[E](equal.md) —  same text", "idx_order": "7", "tier": "resident",
-                                       "idx_section": "S", "idx_sub": ""}
+                                       "idx_section": "S"}
     assert (root / "unclosed.md").read_text(encoding="utf-8") == "---\nname: never closed\n" and "tier" not in _meta(root, "hard.md")
     notes = " ".join(res.messages)
     assert "'idx' key already holds a different" in notes and "cannot be patched" in notes and "hard link" in notes

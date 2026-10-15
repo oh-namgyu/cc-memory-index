@@ -13,7 +13,9 @@ import re
 from typing import Optional
 
 from .safeio import SafeIOError, StoreDir, TooLarge
+from .text import quote
 
+MIN_TRANSCRIPTS = 1
 MAX_TRANSCRIPTS = 50
 CHUNK_BYTES = 1 << 20
 FILE_MAX_BYTES = 50 << 20
@@ -23,6 +25,13 @@ SUFFIX = ".jsonl"
 # A Windows separator appears JSON-escaped (two backslashes) in the JSONL transcripts.
 _MENTION = re.compile(rb"memory(?:/|\\{1,2})([A-Za-z0-9][A-Za-z0-9_.-]*\.md)")
 _NOT_NAME = re.compile(rb"[^A-Za-z0-9_.-]")
+
+
+def check_count(n: int) -> int:
+    """n when it is a number of transcripts that suggest may read (DESIGN §12), else ValueError."""
+    if isinstance(n, bool) or not MIN_TRANSCRIPTS <= n <= MAX_TRANSCRIPTS:
+        raise ValueError(f"the number of transcripts must be between {MIN_TRANSCRIPTS} and {MAX_TRANSCRIPTS}")
+    return n
 
 
 def transcripts_dir(store_path: str) -> str:
@@ -89,10 +98,10 @@ def _scan(sd: StoreDir, name: str, wanted: set[str], limit: int, notes: list[str
             used += len(piece)
             mentions.feed(piece)
     except TooLarge:
-        notes.append(f"transcript {name!r} skipped: it grew past the read limit while being read")
+        notes.append(f"transcript {quote(name)} skipped: it grew past the read limit while being read")
         return None, limit + 1
     except (OSError, SafeIOError):
-        notes.append(f"transcript {name!r} skipped: it could not be read as a regular file")
+        notes.append(f"transcript {quote(name)} skipped: it could not be read as a regular file")
         return None, used
     return mentions.finish(), used
 
@@ -100,8 +109,7 @@ def _scan(sd: StoreDir, name: str, wanted: set[str], limit: int, notes: list[str
 def count_mentions(store_path: str, names: set[str], n: int, notes: Optional[list[str]] = None) -> dict[str, int]:
     """For each name, how many of the n most recent transcripts of the store's project mention
     `memory/<name>` (each transcript counts once per name). Skips and limits are noted in notes."""
-    if isinstance(n, bool) or not 1 <= n <= MAX_TRANSCRIPTS:
-        raise ValueError(f"the number of transcripts must be between 1 and {MAX_TRANSCRIPTS}")
+    check_count(n)
     out: list[str] = [] if notes is None else notes
     counts = dict.fromkeys(names, 0)
     wanted, read, left = set(names), 0, TOTAL_MAX_BYTES
@@ -109,10 +117,10 @@ def count_mentions(store_path: str, names: set[str], n: int, notes: Optional[lis
         chosen = newest(sd, n)
         for name, size in chosen:
             if size > FILE_MAX_BYTES:
-                out.append(f"transcript {name!r} skipped: larger than {FILE_MAX_BYTES >> 20} MiB")
+                out.append(f"transcript {quote(name)} skipped: larger than {FILE_MAX_BYTES >> 20} MiB")
                 continue
             if size > left:
-                out.append(f"transcripts: stopped before {name!r}: {TOTAL_MAX_BYTES >> 20} MiB read in total")
+                out.append(f"transcripts: stopped before {quote(name)}: {TOTAL_MAX_BYTES >> 20} MiB read in total")
                 break
             found, used = _scan(sd, name, wanted, min(FILE_MAX_BYTES, left), out)
             left -= used

@@ -12,8 +12,9 @@ from storekit import append, built_store, claude_adds_memory, make_store, write_
 from cc_memory_index import fold as fold_mod
 from cc_memory_index import hook
 from cc_memory_index import plan as plan_mod
-from cc_memory_index.build import BuildResult, run_build
+from cc_memory_index.build import run_build
 from cc_memory_index.items import Manual
+from cc_memory_index.result import BuildResult
 from cc_memory_index.safeio import StoreDir
 
 # Planted in the store wherever a scenario allows; it must never reach additionalContext.

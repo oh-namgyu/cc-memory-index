@@ -92,7 +92,7 @@ pass `--dir PATH` or set `CC_MEMORY_INDEX_DIR`.
 |---|---|
 | `build [--force]` | Render L0 and L1. Moves hand-added lines into frontmatter first; `--force` backs up and overwrites instead |
 | `check` | Exit 1 if the generated files are out of date. Writes nothing |
-| `lint` | Broken frontmatter, dangling links and `[[wiki links]]`, unreachable memories, stuck lines. Writes nothing |
+| `lint` | Broken frontmatter, dangling links and `[[wiki links]]` (outside code), unreachable memories, stuck lines. Writes nothing |
 | `suggest [--transcripts N] [--apply]` | When L0 is over budget, propose resident memories to demote (largest first, or least mentioned in the last N transcripts); `--apply` demotes them and rebuilds |
 | `demote FILE` | Set `tier: indexed` on one memory and rebuild |
 | `migrate [--apply \| --restore SNAPSHOT]` | Convert a hand-written `MEMORY.md`. Its opening text (before the first heading or list line) stays as the preamble; other text that is not an index line (code blocks, nested lists, paragraphs) is moved verbatim into a notes memory file |
