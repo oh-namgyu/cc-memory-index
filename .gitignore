@@ -6,3 +6,5 @@ build/
 dist/
 .venv/
 .mypy_cache/
+.env
+.env.*

@@ -19,7 +19,8 @@ from cc_memory_index.result import BuildResult
 from cc_memory_index.suggest import run_suggest
 
 TIGHT = {"budget_bytes": 2048, "budget_lines": 20}
-SECRET = "sk-ant-api03-TOPSECRETVALUE-do-not-leak"
+# A unique marker planted in transcripts: no output may ever contain it.
+CANARY = "transcript-canary-7f3a9c-must-not-leak"
 NAMES = [f"m{i:02d}.md" for i in range(14)]
 
 
@@ -68,7 +69,7 @@ def test_overflow_without_transcripts_takes_the_largest_first(tmp_path: Path) ->
 
 def _transcripts(root: Path, mentioned: dict[str, int], count: int = 3) -> None:
     for t in range(count):
-        lines = [f'{{"file_path":"/p/memory/{f}","note":"{SECRET}"}}\n' for f, n in mentioned.items() if n > t]
+        lines = [f'{{"file_path":"/p/memory/{f}","note":"{CANARY}"}}\n' for f, n in mentioned.items() if n > t]
         write_transcript(root.parent, f"t{t}.jsonl", "".join(lines), t)
 
 
@@ -97,7 +98,7 @@ def test_oversized_item_comes_first_even_when_often_mentioned(tmp_path: Path) ->
 def _assert_private(res: BuildResult, captured: Any, caplog: pytest.LogCaptureFixture) -> None:
     dumped = json.dumps({"messages": res.messages, "stats": res.stats}) + captured.out + captured.err
     dumped += "\n".join(r.getMessage() for r in caplog.records)
-    assert SECRET not in dumped and "TOPSECRET" not in dumped
+    assert CANARY not in dumped and "7f3a9c" not in dumped
 
 
 def test_transcript_text_never_leaks(

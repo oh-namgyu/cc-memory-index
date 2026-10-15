@@ -13,12 +13,13 @@ from cc_memory_index.safeio import StoreDir
 from cc_memory_index.transcripts import Mentions, count_mentions, newest, transcripts_dir
 
 Symlink = Callable[[Path, Path], None]
-SECRET = "sk-ant-api03-TOPSECRETVALUE-do-not-leak"
+# A unique marker planted in transcripts: no output may ever contain it.
+CANARY = "transcript-canary-7f3a9c-must-not-leak"
 NAMES = {"alpha.md", "beta.md", "foo.md", "foo.md.bak.md", "gamma.md"}
 
 
 def _line(path: str) -> str:
-    return '{"type":"tool_use","input":{"file_path":"' + path + '","content":"' + SECRET + '"}}\n'
+    return '{"type":"tool_use","input":{"file_path":"' + path + '","content":"' + CANARY + '"}}\n'
 
 
 def _counts(root: Path, n: int = 10, names: set[str] = NAMES) -> tuple[dict[str, int], list[str]]:
@@ -107,7 +108,7 @@ def test_transcripts_live_next_to_the_unresolved_store(tmp_path: Path, symlink: 
 
 def _assert_private(notes: list[str]) -> None:
     text = "\n".join(notes)
-    assert SECRET not in text and "TOPSECRET" not in text and "tool_use" not in text
+    assert CANARY not in text and "7f3a9c" not in text and "tool_use" not in text
 
 
 def test_a_transcript_over_the_file_cap_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
