@@ -58,7 +58,6 @@ metadata:
   tier: resident            # resident = L0. Anything else or missing = L1
   idx: "[Build commands](build-commands.md) — make test, never make all"
   idx_section: "Reference"
-  idx_sub: ""
   idx_order: 40
 ---
 ```
