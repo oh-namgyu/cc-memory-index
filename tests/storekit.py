@@ -49,18 +49,18 @@ def make_store(tmp_path: Path, config: Optional[dict[str, Any]] = None) -> Path:
     root = tmp_path / "store"
     root.mkdir()
     if config is not None:
-        (root / ".memory-index.json").write_text(json.dumps(config), encoding="utf-8")
+        (root / ".memory-index.json").write_bytes(json.dumps(config).encode("utf-8"))
     return root
 
 
 def write_memory(root: Path, file: str, /, **meta: Union[str, int]) -> Path:
     path = root / file
-    path.write_text(memory_text(**meta), encoding="utf-8")
+    path.write_bytes(memory_text(**meta).encode("utf-8"))  # exact LF on every OS
     return path
 
 
 def write_json(root: Path, name: str, obj: Any) -> None:
-    (root / name).write_text(json.dumps(obj), encoding="utf-8")
+    (root / name).write_bytes(json.dumps(obj).encode("utf-8"))
 
 
 def snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
