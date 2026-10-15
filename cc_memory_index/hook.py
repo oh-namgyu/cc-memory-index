@@ -2,24 +2,36 @@
 
 Claude Code runs this after every Write, Edit or MultiEdit. It rebuilds the index only for a
 memory file that sits directly inside a store this tool has already written, and tells Claude
-what happened through `additionalContext`. It always exits 0: a bug here must never block a
-session.
+what happened through `additionalContext`. That text is fixed wording, counts and validated
+memory file names; nothing else read from the store reaches Claude through it. It always exits
+0: a bug here must never block a session.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
 from typing import IO, Any, Mapping, Optional
 
-from .build import BuildResult, run_build
-from .store import store_root_for_edit
+from .build import EXIT_CONCURRENT, EXIT_EDITED, EXIT_IO, EXIT_LOCK, EXIT_OK, EXIT_OVERFLOW, EXIT_PARSE
+from .build import EXIT_INVARIANT, EXIT_USAGE, BuildResult, run_build
+from .store import store_root_for_edit, valid_source_name
 
 MAX_INPUT_BYTES = 1 << 20
 MAX_CONTEXT_CHARS = 2000
+MAX_NAMES = 5
 TOOLS = frozenset({"Write", "Edit", "MultiEdit"})
 ENV_DISABLE = "CC_MEMORY_INDEX_DISABLE"
+PREFIX = "cc-memory-index: "
+SEE_LINT = "Run `cc-memory-index lint` to see the details."
+NOT_REBUILT = {
+    EXIT_USAGE: "The index was not rebuilt: the store's configuration or one of its data files is invalid,"
+                " or a migration is unfinished.",
+    EXIT_IO: "The index was not rebuilt because of an I/O error; the store is still valid.",
+    EXIT_INVARIANT: "The index was not rebuilt: an internal consistency check failed, so nothing was written.",
+}
 
 
 def target_store(raw: bytes) -> Optional[str]:
@@ -28,7 +40,7 @@ def target_store(raw: bytes) -> Optional[str]:
         return None
     try:
         payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):  # RecursionError: deeply nested JSON
         return None
     if not isinstance(payload, dict) or payload.get("tool_name") not in TOOLS:
         return None
@@ -39,46 +51,90 @@ def target_store(raw: bytes) -> Optional[str]:
     return store_root_for_edit(file_path) if isinstance(file_path, str) else None
 
 
-def _names(entries: Any, key: str) -> list[str]:
-    if not isinstance(entries, list):
-        return []
-    return [str(e.get(key, "")) for e in entries if isinstance(e, dict)]
+def _count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _rescued(stats: Mapping[str, Any]) -> Optional[str]:
+    entries = stats.get("rescued")
+    files = [e.get("file") for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    names: list[str] = [name for name in files if isinstance(name, str) and valid_source_name(name)]
+    if not names:
+        return None
+    shown = ", ".join(names[:MAX_NAMES]) + (f" and {len(names) - MAX_NAMES} more" if len(names) > MAX_NAMES else "")
+    saved = (f"The line you added for {shown} was saved as that file's" if len(names) == 1
+             else f"The lines you added for {shown} were saved as those files'")
+    return (
+        f"MEMORY.md is generated from each memory file's frontmatter. {saved} metadata.idx and listed in the"
+        " on-demand index, which is the right place for most memories. Set metadata.tier: resident only if"
+        " a memory must be known at the start of every session; MEMORY.md has a size budget."
+    )
+
+
+def _outcome(code: int, stats: Mapping[str, Any]) -> Optional[str]:
+    """One fixed sentence for the build's exit code (DESIGN §10), or None when there is nothing to say."""
+    if code in (EXIT_OK, EXIT_LOCK):
+        return None
+    if code == EXIT_OVERFLOW:
+        overflow = stats.get("overflow")
+        count = f"{overflow} resident entries" if isinstance(overflow, int) else "Some resident entries"
+        return (f"{count} no longer fit the MEMORY.md budget and are listed in the on-demand index instead."
+                " Run `cc-memory-index suggest` to choose memories to demote.")
+    if code == EXIT_EDITED:
+        return (
+            f"Your edit to the generated index was not applied: {_count(stats.get('unrescuable'))} added line(s)"
+            " could not be kept. A line added by hand is kept only when it links to exactly one existing memory"
+            " file that has no metadata.idx yet, and the generated header and preamble must stay unchanged."
+            " Put the line into that memory file's frontmatter (metadata.idx) instead; the index is rebuilt"
+            " automatically. `cc-memory-index build` lists the reasons."
+        )
+    if code == EXIT_CONCURRENT:
+        return "A memory file changed while the index was rebuilt; it will be rebuilt after the next edit."
+    if code == EXIT_PARSE:
+        return f"A memory file's frontmatter could not be parsed, so it is indexed by its file name only. {SEE_LINT}"
+    return NOT_REBUILT.get(code, f"The index was not rebuilt (exit {code}).") + " " + SEE_LINT
 
 
 def describe(result: BuildResult) -> Optional[str]:
     """What Claude should know about this rebuild, or None when there is nothing to say."""
     stats: Mapping[str, Any] = result.stats or {}
-    lines = []
-    rescued = _names(stats.get("rescued"), "file")
-    if rescued:
-        lines.append(
-            "MEMORY.md is generated from each memory file's frontmatter. The line you added for "
-            + ", ".join(rescued)
-            + " was saved as that file's metadata.idx and is listed in the on-demand index, which is"
-            " the right place for most memories. Set metadata.tier: resident only if this memory must"
-            " be known at the start of every session; MEMORY.md has a size budget."
-        )
-    manual = stats.get("manual_added")
-    if isinstance(manual, list) and manual:
-        lines.append(f"{len(manual)} line(s) without a memory-file link were kept as manual index lines.")
-    if result.code == 1:
-        lines.append(
-            f"{stats.get('overflow', 'Some')} resident entries no longer fit the MEMORY.md budget and were"
-            " listed in the on-demand index instead. Run `cc-memory-index suggest` to choose memories to demote."
-        )
-    elif result.code == 3:
-        reasons = _names(stats.get("unrescuable"), "reason") or result.messages[:3]
-        lines.append(
-            "Your edit to the generated index was not applied ("
-            + "; ".join(reasons[:3])
-            + "). Edit the memory file's frontmatter (metadata.idx) instead; the index is rebuilt automatically."
-        )
-    elif result.code == 4:
-        lines.append("A memory file changed while the index was rebuilt; it will be rebuilt after the next edit.")
-    elif result.code not in (0, 5, 7):
-        lines.append("cc-memory-index could not rebuild the index: " + "; ".join(result.messages[:3]))
-    text = " ".join(lines)
-    return "cc-memory-index: " + text[:MAX_CONTEXT_CHARS] if text else None
+    manual = _count(stats.get("manual_added"))
+    parts = [
+        _rescued(stats),
+        f"{manual} line(s) without a memory-file link were kept as manual index lines." if manual else None,
+        _outcome(result.code, stats),
+    ]
+    text = " ".join(part for part in parts if part)
+    return PREFIX + text[:MAX_CONTEXT_CHARS] if text else None
+
+
+def discard(stream: IO[str]) -> None:
+    """Point stream's file descriptor at the null device once its reader has gone away, so the
+    interpreter's final flush of what is still buffered cannot fail (it would exit 120)."""
+    with contextlib.suppress(OSError, ValueError):
+        null = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null, stream.fileno())
+        finally:
+            os.close(null)
+
+
+def _send(stream: Optional[IO[str]], text: str) -> None:
+    """Write and flush text; a closed or unwritable stream is discarded, never raised."""
+    if stream is None:
+        return
+    try:
+        stream.write(text)
+        stream.flush()
+    except (OSError, ValueError):  # BrokenPipeError; EINVAL for a closed pipe on Windows; encoding
+        discard(stream)
+
+
+def _context(stdin: IO[bytes], env: Mapping[str, str]) -> Optional[str]:
+    if env.get(ENV_DISABLE) == "1":
+        return None
+    store = target_store(stdin.read(MAX_INPUT_BYTES + 1))
+    return None if store is None else describe(run_build(store, force=False))
 
 
 def main(
@@ -87,20 +143,12 @@ def main(
     stderr: Optional[IO[str]] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> int:
-    stdin = stdin or sys.stdin.buffer
-    stdout = stdout or sys.stdout
-    stderr = stderr or sys.stderr
-    env = os.environ if env is None else env
     try:
-        if env.get(ENV_DISABLE) == "1":
-            return 0
-        store = target_store(stdin.read(MAX_INPUT_BYTES + 1))
-        if store is None:
-            return 0
-        context = describe(run_build(store, force=False))
-        if context:
-            output = {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": context}}
-            stdout.write(json.dumps(output) + "\n")
+        context = _context(stdin or sys.stdin.buffer, os.environ if env is None else env)
     except Exception as e:  # noqa: BLE001 - the hook must never fail a tool call
-        stderr.write(f"cc-memory-index hook: {type(e).__name__}: {str(e)[:200]}\n")
+        _send(stderr or sys.stderr, f"cc-memory-index hook: {type(e).__name__}: {str(e)[:200]}\n")
+        return 0
+    if context:
+        output = {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": context}}
+        _send(stdout or sys.stdout, json.dumps(output) + "\n")
     return 0

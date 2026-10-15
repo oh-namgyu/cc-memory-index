@@ -3,6 +3,8 @@
 All notable changes are documented here. Format: [Keep a Changelog](https://keepachangelog.com/), versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-10-15
 ### Added
 - `build` / `check`: generate `MEMORY.md` (L0, resident memories within a byte and line budget) and `index-l1.md` (L1, everything else plus an Overflow section) from each memory file's frontmatter. Nothing is truncated or dropped.
 - Hand-edit rescue: a line Claude adds to `MEMORY.md` is moved into that memory file's `metadata.idx`; unlinked lines become manual lines; edits that cannot be attributed are refused with a reason and nothing is written.

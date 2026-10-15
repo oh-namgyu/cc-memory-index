@@ -16,7 +16,7 @@ from cc_memory_index.render import (
     link_line,
     render,
 )
-from cc_memory_index.rescue import Context, Edited, analyse, default_pieces, lost, memory_links
+from cc_memory_index.rescue import Context, Edited, analyse, default_pieces, lost
 from cc_memory_index.segments import BodyLine, Seg, body_lines, l1_heading, l1_section, pieces, split_head
 from cc_memory_index.store import Config, Source
 
@@ -80,11 +80,6 @@ def test_warning_lines_of_any_count() -> None:
     assert not is_warning_line(line, ["other.md"]) and not is_warning_line("- Warning: 1 thing", [L1])
 
 
-def test_memory_links() -> None:
-    text = "[a](a.md) [web](https://x.org/b.md) [anchor](c.md#top) [mail](mailto:d.md) [up](../e.md) [f]( f.md)"
-    assert memory_links(text) == ["a.md", "mailto:d.md", "../e.md"]
-
-
 def _ctx(sources: list[Source], pending: frozenset[str] = frozenset(), items: Optional[list] = None) -> Context:
     rendered = render(items or [], None, Config())
     return Context(rendered, None, (L1,), {s.name: s for s in sources}, pending, 40, default_pieces(sources))
@@ -112,6 +107,8 @@ def test_classification_and_orders() -> None:
         ("[u](../u.md)", "link target '../u.md' is not a memory file in this directory"),
     ]
     assert all(u.reason.endswith("edit the memory file's frontmatter (metadata.idx) instead") for u in out.unrescuable)
+    assert [u.kind for u in out.unrescuable] == ["duplicate-target", "pending-target", "edited-generated-line",
+                                                 "missing-target", "several-links", "unsafe-target"]
 
 
 def test_generated_head_lines_may_be_missing_or_moved() -> None:
@@ -121,7 +118,8 @@ def test_generated_head_lines_may_be_missing_or_moved() -> None:
     moved = Edited("MEMORY.md", "l0", "\n".join([link_line("old.md"), TITLE, NOTE, "- loose", "## S"]))
     assert analyse([moved], ctx).lines == [ManualLine("loose", "Other", "", 41)]
     (u,) = analyse([Edited("MEMORY.md", "l0", "# My index\n" + "\n".join(head_lines(None, L1)))], ctx).unrescuable
-    assert (u.segment, u.reason) == ("# My index", "preamble edited — change it in .index-manual.json")
+    assert (u.segment, u.reason, u.kind) == ("# My index", "preamble edited — change it in .index-manual.json",
+                                             "preamble-edited")
     mine = render([], "# Mine", Config())
     manual = Context(mine, "# Mine", ctx.l1_names, ctx.sources, ctx.pending_files, 40, ctx.defaults)
     (u,) = analyse([Edited("MEMORY.md", "l0", "\n".join(head_lines(None, L1)) + "\n- x\n")], manual).unrescuable
@@ -145,11 +143,11 @@ def test_l1_reserved_sections_and_head() -> None:
     assert out.lines == [ManualLine("loose", "Other", "", 42)]
     edited = Edited(L1, "l1", "\n".join(l1_head(L1)).replace(L1_NOTE, "my note") + "\n- x\n")
     (u,) = analyse([edited], ctx).unrescuable
-    assert (u.segment, u.reason.split(";")[0]) == ("my note", "the generated header was edited")
+    assert (u.segment, u.reason.split(";")[0], u.kind) == ("my note", "the generated header was edited", "header-edited")
     (u,) = analyse([Edited(L1, "l1", "\n".join(l1_head(L1) + ["stray text", "## S"]))], ctx).unrescuable
     assert u.segment == "stray text"
     (u,) = analyse([Edited("MEMORY.md", "l0", None)], ctx).unrescuable
-    assert u.reason.startswith("not valid UTF-8")
+    assert u.reason.startswith("not valid UTF-8") and u.kind == "not-utf8"
 
 
 def test_lost_counts_only_what_a_file_could_lose() -> None:

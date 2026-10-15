@@ -6,13 +6,15 @@ import json
 import os
 import re
 import stat
-from dataclasses import dataclass, fields
-from typing import Mapping, Optional
+from dataclasses import asdict, dataclass, fields
+from typing import AbstractSet, Mapping, Optional
 
 from .frontmatter import Frontmatter, parse
 from .safeio import Fingerprint, SafeIOError, StoreDir, TooLarge, UnsafeEntry
 
 SOURCE_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\.md\Z")
+# Windows opens a device, not a file, for these names with any extension (CON.md is CON).
+_DEVICE_NAMES = frozenset(["CON", "PRN", "AUX", "NUL"] + [f"{port}{n}" for port in ("COM", "LPT") for n in "123456789"])
 MAX_SOURCES = 5000
 SOURCE_MAX_BYTES = 1024 * 1024
 L0_NAME = "MEMORY.md"
@@ -39,13 +41,13 @@ class ConfigError(Exception):
 
 
 def valid_source_name(name: str) -> bool:
-    """DESIGN §2: a plain name matching SOURCE_NAME_RE that contains no '..'."""
+    """DESIGN §2: a plain name matching SOURCE_NAME_RE, without '..', whose part before the first '.'
+    is not a Windows device name (any case)."""
     return (
         isinstance(name, str)
         and SOURCE_NAME_RE.match(name) is not None
         and ".." not in name
-        and "/" not in name
-        and "\\" not in name
+        and name.split(".", 1)[0].upper() not in _DEVICE_NAMES
     )
 
 
@@ -98,7 +100,7 @@ def _main_worktree(here: str, dot_git: str) -> str:
             head = f.read(GITFILE_MAX_BYTES).decode("utf-8", "replace")
     except OSError:
         return here
-    first = head.splitlines()[0] if head else ""
+    first = head.split("\n", 1)[0].rstrip("\r")
     if not first.startswith("gitdir:"):
         return here
     gitdir = os.path.normpath(os.path.join(here, first[len("gitdir:"):].strip()))
@@ -165,8 +167,8 @@ class Config:
     lock_timeout_s: float = 5
 
     def __post_init__(self) -> None:
-        for f in fields(self):
-            _check_field(f.name, getattr(self, f.name))
+        for key, value in asdict(self).items():
+            _check_field(key, value)
 
 
 def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -240,13 +242,13 @@ def load_source(sd: StoreDir, name: str) -> tuple[Optional[Source], Optional[str
     return Source(name, text, fp, parse(text)), None
 
 
-def scan(sd: StoreDir, cfg: Config, generated_names: set[str]) -> ScanResult:
+def scan(sd: StoreDir, cfg: Config, generated: AbstractSet[str] = frozenset()) -> ScanResult:
     """Read every source in name order; links are never followed and every skip has a reason.
 
-    MEMORY.md and cfg.l1_name are always excluded, compared case-insensitively because the
-    store may live on a case-insensitive file system.
+    MEMORY.md, cfg.l1_name and the other generated names given are excluded, compared
+    case-insensitively because the store may live on a case-insensitive file system.
     """
-    reserved = {n.lower() for n in generated_names} | {L0_NAME.lower(), cfg.l1_name.lower()}
+    reserved = {n.lower() for n in generated} | {L0_NAME.lower(), cfg.l1_name.lower()}
     result = ScanResult([], [])
     for name in sd.names():
         if not name.endswith(".md") or name.lower() in reserved:

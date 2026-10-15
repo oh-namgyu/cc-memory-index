@@ -9,26 +9,21 @@ Rendering the plan in memory gives the would-be L0 and L1.
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import dataclass, field
 from typing import AbstractSet, Mapping, Optional, Sequence, Union
 
 from . import frontmatter
 from .items import (
-    DEFAULT_SECTION, RESIDENT, Manual, ManualLine, PendingEntry, items_from_sources, manual_items,
+    DEFAULT_SECTION, RESIDENT, Manual, ManualLine, PendingEntry, items_from_sources, manual_bytes, manual_items,
 )
-from .items import manual_bytes as manual_file_bytes
+from .links import memory_links
 from .migrate_notes import Notes, Verbatim, notes_text
 from .render import BULLET, Rendered, render
 from .safeio import Fingerprint
 from .store import Config, Source
-from .text import normalize_ws, sanitize, split_segments
+from .text import normalize_ws, sanitize, split_segments, strip_bom
 
-LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
-URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 ORDER_STEP = 10
-_BOM = "\ufeff"
-_FENCE = "---"
 _SECTION = "## "
 _SUB = "### "
 
@@ -87,14 +82,12 @@ def _kind(line: str, verbatim: Verbatim) -> str:
     return "item" if line.startswith(BULLET) and _pieces(line) else "note"
 
 
-def _body_start(lines: Sequence[str]) -> int:
+def _body_start(text: str, lines: Sequence[str]) -> int:
     """Index of the first '## ' heading or top-level list line outside code blocks and comments,
-    after a leading '---' block."""
-    first = 0
-    if lines and lines[0] == _FENCE:
-        first = next((i + 1 for i in range(1, len(lines)) if lines[i] == _FENCE), 0)
+    after a frontmatter block at the start of text (found as for a memory file)."""
+    _, close = frontmatter.locate(text)
     verbatim = Verbatim()
-    return next((i for i in range(first, len(lines)) if _kind(lines[i], verbatim) in ("section", "item")),
+    return next((i for i in range(max(close + 1, 0), len(lines)) if _kind(lines[i], verbatim) in ("section", "item")),
                 len(lines))
 
 
@@ -107,10 +100,10 @@ def split_index(text: str) -> Index:
     section and subsection; every other non-blank line is a note, and so is every line of a code
     block or an HTML comment, blank lines included.
     """
-    lines = (text[len(_BOM):] if text.startswith(_BOM) else text).split("\n")
+    lines = strip_bom(text).split("\n")
     if lines[-1] == "":
         lines.pop()
-    start = _body_start(lines)
+    start = _body_start(text, lines)
     preamble = "\n".join(lines[:start]).strip("\n")
     segments: list[Segment] = []
     notes, verbatim = Notes(), Verbatim()
@@ -132,25 +125,14 @@ def split_index(text: str) -> Index:
     return Index(preamble if preamble.strip() else None, segments, notes)
 
 
-def memory_links(text: str) -> list[str]:
-    """Link targets that name a .md file; URLs with a scheme are not memory links."""
-    return [t for t in LINK.findall(text) if t.endswith(".md") and not URL.match(t)]
-
-
 def _resident_text(src: Source, seg: Segment) -> tuple[Optional[str], str]:
     """src's text with the segment as its resident idx, or None and the reason it cannot be."""
     add: dict[str, Union[str, int]] = {"tier": RESIDENT, "idx": seg.text, "idx_section": seg.section,
                                        "idx_sub": seg.sub, "idx_order": seg.order}
     try:
-        text = frontmatter.patch(src.text, add)
+        return frontmatter.patch_checked(src.text, add, check=("idx", "tier")), ""
     except frontmatter.PatchError as e:
         return None, f"its frontmatter cannot be patched ({e})"
-    fm = frontmatter.parse(text)
-    if normalize_ws(sanitize(fm.get("idx") or "")) != normalize_ws(seg.text):
-        return None, "it already has a different idx"
-    if sanitize(fm.get("tier") or "") != RESIDENT:
-        return None, "it already has a different tier"
-    return text, ""
 
 
 def _assign(plan: Plan, seg: Segment, by_name: Mapping[str, Source], blocked: AbstractSet[str],
@@ -192,9 +174,9 @@ def make_plan(index_text: str, sources: Sequence[Source], blocked: AbstractSet[s
     return plan
 
 
-def manual_bytes(plan: Plan) -> bytes:
-    """.index-manual.json holding the plan's preamble and manual lines."""
-    return manual_file_bytes(Manual(plan.index.preamble, list(plan.manual)))
+def manual_file(plan: Plan) -> bytes:
+    """.index-manual.json holding the plan's preamble and manual lines (written even when both are empty)."""
+    return manual_bytes(Manual(plan.index.preamble, list(plan.manual)))
 
 
 def render_store(sources: Sequence[Source], manual: Manual, pending: Sequence[PendingEntry],

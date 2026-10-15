@@ -41,6 +41,18 @@ Symlink = Callable[[Path, Path], None]
         ("x.md\n", False),
         ("메모.md", False),
         ("", False),
+        ("CON.md", False),
+        ("con.md", False),
+        ("Nul.md", False),
+        ("prn.md", False),
+        ("AUX.notes.md", False),
+        ("COM1.md", False),
+        ("lpt9.md", False),
+        ("COM0.md", True),
+        ("COM10.md", True),
+        ("CONSOLE.md", True),
+        ("acon.md", True),
+        ("con-x.md", True),
     ],
 )
 def test_source_name_rule(name: str, ok: bool) -> None:

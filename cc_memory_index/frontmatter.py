@@ -1,26 +1,31 @@
 """Strict-subset frontmatter parser and insert-only patcher (DESIGN §3.1, §3.2).
 
-Nothing here evaluates input: lines are classified with regular expressions and every line
-the parser does not understand is left byte-for-byte as it was.
+Nothing here evaluates input: lines are classified with regular expressions and every line the
+parser does not understand is left byte-for-byte as it was, or, when the patcher cannot be sure of
+the structure around it, makes patch() refuse (PatchError) rather than add a second key or block.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Mapping, Optional, Union
+from typing import Mapping, Optional, Sequence, Union
 
 from . import scalar
-from .text import sanitize
+from .scalar import KEY, SEQ, entry_line
+from .text import BOM, normalize_ws, sanitize, strip_bom, utf8_prefix
 
 WINDOW_BYTES = 64 * 1024
-_BOM = "﻿"
 _FENCE = "---"
-_KEY = re.compile(r"( *)([A-Za-z0-9_][A-Za-z0-9_.-]*):(?:[ \t]+(.*))?\Z")
-_KEY_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
+# '---' followed by spaces or tabs: YAML starts a document there, some frontmatter readers end the
+# block there and others do not. Where a fence could be, it makes the frontmatter unparseable.
+_LOOSE_FENCE = re.compile(r"---[ \t]+\Z")
+_YAML11_BREAK = re.compile("[\x85\u2028\u2029]")  # line breaks to YAML 1.1 and JavaScript readers
 _ABSENT = -1
 _UNCLOSED = -2
-_UNCLOSED_MSG = "no closing '---' line within the first 64 KiB"
+_LOOSE = -3
+_BROKEN = {_UNCLOSED: "no closing '---' line within the first 64 KiB",
+           _LOOSE: "a '---' line ends with spaces or tabs, so it is unclear where the frontmatter ends; remove them"}
 _REPLACEABLE = frozenset({"tier"})
 _INDENT = 2
 
@@ -39,9 +44,7 @@ class Frontmatter:
 
     def get(self, key: str) -> Optional[str]:
         """Value from the metadata block, else from the top level, else None."""
-        if key in self.metadata:
-            return self.metadata[key]
-        return self.top.get(key)
+        return self.metadata[key] if key in self.metadata else self.top.get(key)
 
 
 @dataclass
@@ -51,6 +54,7 @@ class _Entry:
     line: int
     end: int
     indent: int
+    null: bool
     recorded: bool = False
 
 
@@ -65,6 +69,11 @@ class _Layout:
     meta_indent: Optional[int] = None
     meta_last: Optional[int] = None
     meta_bad: Optional[str] = None
+    unknown: Optional[str] = None
+
+    def doubt(self, i: int, why: str) -> None:
+        """Record the first line whose structure the patcher cannot be sure of."""
+        self.unknown = self.unknown or f"line {i + 1} {why}"
 
     def find(self, key: str) -> Optional[_Entry]:
         """First entry for key, metadata block first (the same precedence as get)."""
@@ -75,43 +84,35 @@ class _Layout:
         return None
 
     def value(self, entry: _Entry) -> Optional[str]:
-        if not entry.recorded:
-            return None
-        return (self.top if entry.scope == "top" else self.meta).get(entry.key)
+        return (self.top if entry.scope == "top" else self.meta).get(entry.key) if entry.recorded else None
 
 
 def _bare(line: str) -> str:
     return line[:-1] if line.endswith("\r") else line
 
 
-def _window(text: str) -> str:
-    """Longest prefix of text that fits in WINDOW_BYTES of UTF-8."""
-    head = text[:WINDOW_BYTES]
-    raw = head.encode("utf-8", "surrogatepass")
-    if len(raw) <= WINDOW_BYTES:
-        return head
-    return head[: len(raw[:WINDOW_BYTES].decode("utf-8", "ignore"))]
-
-
 def locate(text: str) -> tuple[list[str], int]:
-    """Window lines and the index of the closing fence, or _ABSENT / _UNCLOSED."""
-    window = _window(text)
+    """Window lines and the index of the closing fence, or _ABSENT, _UNCLOSED or _LOOSE."""
+    window = utf8_prefix(text, WINDOW_BYTES)
     lines = window.split("\n")
     complete = lines if len(window) == len(text) else lines[:-1]
-    first = _bare(complete[0]) if complete else ""
-    if first.startswith(_BOM):
-        first = first[1:]
+    first = strip_bom(_bare(complete[0])) if complete else ""
     if first != _FENCE:
-        return lines, _ABSENT
+        return lines, _LOOSE if _LOOSE_FENCE.match(first) else _ABSENT
     for i in range(1, len(complete)):
-        if _bare(complete[i]) == _FENCE:
+        line = _bare(complete[i])
+        if line == _FENCE:
             return lines, i
+        if _LOOSE_FENCE.match(line):
+            return lines, _LOOSE
     return lines, _UNCLOSED
 
 
 def _add_entry(lay: _Layout, scope: str, m: "re.Match[str]", i: int, indent: int) -> _Entry:
-    entry = _Entry(scope, m.group(2), i, i, indent)
+    entry = _Entry(scope, m.group(2), i, i, indent, scalar.is_null(m.group(3)))
     lay.entries.append(entry)
+    if scalar.unclosed(m.group(3)):
+        lay.doubt(i, "opens a quoted value that does not end on that line")
     target = lay.top if scope == "top" else lay.meta
     value = scalar.value(m.group(3))
     if value is not None and entry.key not in target:
@@ -120,10 +121,22 @@ def _add_entry(lay: _Layout, scope: str, m: "re.Match[str]", i: int, indent: int
     return entry
 
 
-def _top_line(lay: _Layout, i: int, m: Optional["re.Match[str]"]) -> tuple[Optional[_Entry], bool]:
-    """Handle a column-0 line; returns (entry, metadata block opened)."""
+def _top_line(
+    lay: _Layout, i: int, line: str, m: Optional["re.Match[str]"], prev: Optional[_Entry]
+) -> tuple[Optional[_Entry], bool]:
+    """Handle a column-0 line; returns (the entry later deeper lines belong to, metadata block opened).
+
+    A '- ' line at column 0 is understood only as the block sequence value of the null-valued key
+    before it; any other column-0 line that is not 'key: value' makes the structure unknown.
+    """
     if m is None:
-        return None, False
+        if prev is None or not prev.null or not SEQ.match(line):
+            lay.doubt(i, "is neither 'key: value' nor a comment")
+            return None, False
+        if scalar.unclosed(scalar.item_value(line)):
+            lay.doubt(i, "opens a quoted value that does not end on that line")
+        _continuation(lay, prev, i)
+        return prev, False
     if m.group(2) != "metadata":
         return _add_entry(lay, "top", m, i, 0), False
     if not scalar.is_null(m.group(3)):
@@ -162,15 +175,17 @@ def _classify(lines: list[str], close: int) -> _Layout:
     prev: Optional[_Entry] = None
     for i in range(1, close):
         line = _bare(lines[i])
+        if _YAML11_BREAK.search(line):
+            lay.doubt(i, "holds NEL, U+2028 or U+2029, which some YAML readers take as a line break")
         stripped = line.strip()
         indent = len(line) - len(line.lstrip(" "))
         if not stripped or stripped.startswith("#"):
             if meta_open and stripped and indent > 0:
                 lay.meta_last = i
             continue
-        m = _KEY.match(line)
+        m = KEY.match(line)
         if indent == 0:
-            prev, meta_open = _top_line(lay, i, m)
+            prev, meta_open = _top_line(lay, i, line, m, prev)
             continue
         if meta_open:
             lay.meta_last = i
@@ -188,20 +203,10 @@ def parse(text: str) -> Frontmatter:
     lines, close = locate(text)
     if close == _ABSENT:
         return Frontmatter({}, {}, False, True, None)
-    if close == _UNCLOSED:
-        return Frontmatter({}, {}, True, False, _UNCLOSED_MSG)
+    if close in _BROKEN:
+        return Frontmatter({}, {}, True, False, _BROKEN[close])
     lay = _classify(lines, close)
     return Frontmatter(lay.top, lay.meta, True, True, None)
-
-
-def _format(key: str, value: Union[str, int]) -> str:
-    if not _KEY_NAME.match(key) or key == "metadata":
-        raise ValueError(f"invalid frontmatter key {key!r}")
-    if isinstance(value, bool) or not isinstance(value, (str, int)):
-        raise TypeError(f"value for {key!r} must be str or int")
-    if isinstance(value, int):
-        return str(value)
-    return '"' + sanitize(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _eol(text: str) -> str:
@@ -210,14 +215,11 @@ def _eol(text: str) -> str:
 
 
 def _insertion(lay: _Layout, lines: list[str], cr: str) -> tuple[int, int, list[str]]:
-    if lay.meta_bad:
-        raise PatchError(lay.meta_bad)
     if lay.meta_line is None or lay.meta_last is None:
         new = ["metadata:" + cr] + [" " * _INDENT + s + cr for s in lines]
         return lay.close, lay.close, new
-    pad = " " * (lay.meta_indent or _INDENT)
     pos = lay.meta_last + 1
-    return pos, pos, [pad + s + cr for s in lines]
+    return pos, pos, [" " * (lay.meta_indent or _INDENT) + s + cr for s in lines]
 
 
 def _plan(
@@ -227,7 +229,7 @@ def _plan(
     missing: list[str] = []
     for key, value in merged.items():
         entry = lay.find(key)
-        line = f"{key}: {_format(key, value)}"
+        line = entry_line(key, value)
         if entry is None:
             missing.append(line)
         elif key in repl and not (entry.line == entry.end and lay.value(entry) == sanitize(str(value))):
@@ -247,25 +249,52 @@ def patch(
     for key in repl:
         if key not in _REPLACEABLE:
             raise ValueError(f"only {sorted(_REPLACEABLE)} can be replaced, not {key!r}")
-    merged = dict(add)
-    merged.update(repl)
+    merged = {**add, **repl}
     for key, value in merged.items():
-        _format(key, value)
+        entry_line(key, value)
     lines, close = locate(text)
-    if close == _UNCLOSED:
-        raise PatchError(_UNCLOSED_MSG)
+    if close in _BROKEN:
+        raise PatchError(_BROKEN[close])
     if not merged:
         return text
     if close == _ABSENT:
-        bom = _BOM if text.startswith(_BOM) else ""
-        eol = _eol(text)
-        body = [f"{' ' * _INDENT}{k}: {_format(k, v)}" for k, v in merged.items()]
-        return bom + eol.join([_FENCE, "metadata:"] + body + [_FENCE]) + eol + text[len(bom):]
+        return _new_block(text, merged)
+    lay = _classify(lines, close)
+    problem = lay.meta_bad or lay.unknown
+    if problem is not None:
+        raise PatchError(problem)
     head = lines[: close + 1]
-    edits = _plan(_classify(lines, close), merged, repl, "\r" if head[0].endswith("\r") else "")
+    edits = _plan(lay, merged, repl, "\r" if head[0].endswith("\r") else "")
     if not edits:
         return text
     new_head = list(head)
     for start, end, new in sorted(edits, key=lambda e: (e[0], e[1]), reverse=True):
         new_head[start:end] = new
     return "\n".join(new_head) + text[len("\n".join(head)):]
+
+
+def _new_block(text: str, merged: Mapping[str, Union[str, int]]) -> str:
+    """text without frontmatter, after a new block holding only metadata (BOM and line ending kept)."""
+    bom = BOM if text.startswith(BOM) else ""
+    eol = _eol(text)
+    body = [" " * _INDENT + entry_line(k, v) for k, v in merged.items()]
+    return bom + eol.join([_FENCE, "metadata:"] + body + [_FENCE]) + eol + text[len(bom):]
+
+
+def _norm(value: Optional[str]) -> str:
+    return normalize_ws(sanitize(value or ""))
+
+
+def patch_checked(text: str, add: Mapping[str, Union[str, int]], replace: Optional[Mapping[str, str]] = None,
+                  check: Sequence[str] = ()) -> str:
+    """patch(), then parse the result again: PatchError unless it parses and every key in check reads
+    back as the value asked for. Every command that patches a memory file writes only this result."""
+    out = patch(text, add, replace)
+    fm = parse(out)
+    if not fm.ok:
+        raise PatchError(f"the patched frontmatter would not parse: {fm.error}")
+    wanted = {**add, **(replace or {})}
+    for key in check:
+        if _norm(fm.get(key)) != _norm(str(wanted[key])):
+            raise PatchError(f"its {key!r} key already holds a different, empty or non-plain value")
+    return out

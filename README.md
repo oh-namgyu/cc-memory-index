@@ -95,10 +95,11 @@ pass `--dir PATH` or set `CC_MEMORY_INDEX_DIR`.
 | `lint` | Broken frontmatter, dangling links and `[[wiki links]]`, unreachable memories, stuck lines. Writes nothing |
 | `suggest [--transcripts N] [--apply]` | When L0 is over budget, propose resident memories to demote (largest first, or least mentioned in the last N transcripts); `--apply` demotes them and rebuilds |
 | `demote FILE` | Set `tier: indexed` on one memory and rebuild |
-| `migrate [--apply \| --restore SNAPSHOT]` | Convert a hand-written `MEMORY.md`; text that is not an index line (code blocks, nested lists, paragraphs) is moved verbatim into a notes memory file |
+| `migrate [--apply \| --restore SNAPSHOT]` | Convert a hand-written `MEMORY.md`. Its opening text (before the first heading or list line) stays as the preamble; other text that is not an index line (code blocks, nested lists, paragraphs) is moved verbatim into a notes memory file |
 | `hook` | The `PostToolUse` entry point the plugin calls |
 
-Every command except `hook` takes `--dir PATH` and `--json`. Exit codes are listed in [docs/DESIGN.md](docs/DESIGN.md#10-commands-and-exit-codes).
+Every command except `hook` takes `--dir PATH` and `--json`; `hook` rejects them. Without
+`--json` the whole report goes to stdout when the exit code is 0 or 1 and to stderr otherwise. Exit codes are listed in [docs/DESIGN.md](docs/DESIGN.md#10-commands-and-exit-codes).
 
 ## Frontmatter
 
@@ -131,9 +132,9 @@ are preserved. Without `idx`, the line is built from `name` and `description`.
 | `lock_timeout_s` | 5 | 1–60 |
 
 The defaults sit at about 80% of Claude Code's limits so that its own "near the limit" reminders
-stay away. With one entry per line, as Claude Code's own guidance asks, the line budget usually
-binds first: about 150 resident entries fit, and the rest are listed under *Overflow* in L1 until
-you demote some (`suggest` proposes which). An entry longer than `item_max_bytes` is listed in L1
+stay away. With one entry per line, as Claude Code's own guidance asks, about 135–150 resident
+entries of typical length fit (fewer for long or non-ASCII entries); the rest are listed under
+*Overflow* in L1 until you demote some (`suggest` proposes which). An entry longer than `item_max_bytes` is listed in L1
 instead of being cut.
 
 ## Safety
@@ -156,9 +157,10 @@ store that the next run completes. Details and the remaining limits are in [SECU
 ## Development
 
 ```sh
-python3 -m pip install pytest
+python3 -m pip install pytest pyflakes mypy==1.20.2
 python3 -m pytest -q tests/          # or scripts/test-matrix.sh for Python 3.9 and 3.12 in Docker
-python3 scripts/check_forbidden.py  # fails on network, process or dynamic-code APIs
+python3 scripts/check_forbidden.py  # import allowlist; no process, network or dynamic-code APIs
+python3 -m mypy --strict --python-version 3.9 cc_memory_index
 ```
 
 The design contract is [docs/DESIGN.md](docs/DESIGN.md). See [CONTRIBUTING.md](CONTRIBUTING.md).

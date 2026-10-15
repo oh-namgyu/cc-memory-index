@@ -13,7 +13,7 @@ from .build import EXIT_OK, EXIT_OUT_OF_SYNC, EXIT_OVERFLOW, EXIT_USAGE, BuildRe
 from .demote import INDEXED, demote_files
 from .items import Item
 from .plan import prepare
-from .render import Rendered, fill, head_lines, nbytes, render
+from .render import Rendered, fill, head_lines, item_bytes, nbytes, render
 from .safeio import StoreDir
 from .store import L0_NAME, Config, load_config
 from .transcripts import MAX_TRANSCRIPTS, count_mentions
@@ -45,9 +45,8 @@ def _rank(resident: Sequence[Item], cfg: Config, counts: Optional[dict[str, int]
     out: list[Candidate] = []
     for it in resident:
         if it.origin == "source" and it.file is not None:
-            size = nbytes(it.idx)
-            out.append(Candidate(it.file, size, None if counts is None else counts.get(it.file, 0),
-                                 size > cfg.item_max_bytes))
+            out.append(Candidate(it.file, nbytes(it.idx), None if counts is None else counts.get(it.file, 0),
+                                 item_bytes(it) > cfg.item_max_bytes))
     return sorted(out, key=lambda c: (not c.oversized, c.mentions or 0, -c.bytes, c.file))
 
 
@@ -71,7 +70,7 @@ def _describe(c: Candidate, transcripts: Optional[int]) -> str:
     if c.mentions is not None:
         line += f", mentioned in {c.mentions} of the last {transcripts} transcripts"
     if c.oversized:
-        line += " (over item_max_bytes, so it cannot be resident: shorten its idx or demote it)"
+        line += " (over item_max_bytes, so it cannot be resident: shorten its idx and headings, or demote it)"
     return line
 
 

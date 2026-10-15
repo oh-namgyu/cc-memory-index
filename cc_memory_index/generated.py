@@ -8,10 +8,13 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Mapping, Optional, Sequence
+from typing import AbstractSet, Mapping, Optional
 
-from .safeio import Fingerprint, SafeIOError, StoreDir
-from .store import L0_NAME, Config, Source, reject_duplicates, valid_source_name
+from .render import L1_TITLE, l1_head, preamble_lines
+from .safeio import ANY, Fingerprint, SafeIOError, StoreDir
+from .segments import norm
+from .store import L0_NAME, Config, reject_duplicates, valid_source_name
+from .text import strip_bom
 
 MIGRATING_MARK = ".index-migrating"
 RECORD_VERSION = 1
@@ -71,18 +74,20 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def has_content(data: Optional[bytes]) -> bool:
-    """True unless the file is absent, empty, or holds only blank lines and level-1 titles."""
+def known_lines(preamble: Optional[str]) -> frozenset[str]:
+    """The lines this tool writes as titles, normalised: the L0 preamble (the default one when there is
+    no manual preamble) and the L1 title. A file holding only these and blank lines loses nothing."""
+    return frozenset(norm(line) for line in preamble_lines(preamble) + [L1_TITLE]) - {""}
+
+
+def has_content(data: Optional[bytes], known: AbstractSet[str]) -> bool:
+    """True unless the file is absent or every line is blank or one of known (see known_lines)."""
     if data is None:
         return False
     text = as_text(data)
     if text is None:
         return True
-    for line in text.splitlines():
-        bare = line.strip().lstrip("﻿")
-        if bare and bare != "#" and not bare.startswith("# "):
-            return True
-    return False
+    return any(norm(line) and norm(line) not in known for line in strip_bom(text).split("\n"))
 
 
 def record_bytes(l0: str, l1: str, l1_name: str = DEFAULT_L1_NAME, stale: Optional[Mapping[str, str]] = None) -> bytes:
@@ -123,32 +128,25 @@ def read_record(current: Current) -> Optional[Record]:
     return Record(obj["l0"], obj["l1"], l1_name, dict(stale))
 
 
-def parse_record(current: Current) -> Optional[dict[str, str]]:
-    """{'l0': sha, 'l1': sha, 'l1_name': name} from .index-render.json, or None when absent or malformed."""
-    record = read_record(current)
-    return None if record is None else {"l0": record.l0, "l1": record.l1, "l1_name": record.l1_name}
-
-
-def needs_migration(l0: Current, record: Current, sources: Sequence[Source], has_manual: bool) -> bool:
-    """DESIGN §8: a hand-written MEMORY.md, no render record, no manual-lines file (migrating an
-    index that links no memory file writes only that) and no source with a tier."""
-    if record.data is not None or has_manual or not has_content(l0.data):
-        return False
-    return not any(src.fm.get("tier") is not None for src in sources)
+def needs_migration(l0: Optional[bytes], has_record: bool, has_manual: bool) -> bool:
+    """DESIGN §8: MEMORY.md holds hand-written content, and neither file that only this tool writes is
+    there: the render record and the manual-lines file (migrate --apply always writes one). A tier in
+    a memory file says nothing, since anyone may set one by hand."""
+    return not has_record and not has_manual and has_content(l0, known_lines(None))
 
 
 def edited_generated_files(
-    record: Optional[Record], current: Mapping[str, Current], fresh: Mapping[str, str]
+    record: Optional[Record], current: Mapping[str, Current], fresh: Mapping[str, str], known: AbstractSet[str]
 ) -> list[str]:
     """Roles ('l0', 'l1') of the generated files whose current content writing the fresh render would lose.
 
-    current and fresh are keyed by role. A file is not edited when it is absent, has no content
-    beyond titles, equals the fresh render (an interrupted build converges), or matches what this
-    tool recorded when it last wrote it. CRLF is normalised first.
+    current and fresh are keyed by role. A file is not edited when it is absent, holds nothing but
+    blank lines and known lines (see known_lines), equals the fresh render (an interrupted build
+    converges), or matches what this tool recorded when it last wrote it. CRLF is normalised first.
     """
     edited: list[str] = []
     for role, cur in current.items():
-        if not has_content(cur.data):
+        if not has_content(cur.data, known):
             continue
         text = as_text(cur.data)
         if text is not None and (
@@ -159,11 +157,18 @@ def edited_generated_files(
     return edited
 
 
+def is_l1_text(text: str, name: str) -> bool:
+    """True when text starts with exactly the head (frontmatter with generated: true, title, note)
+    that this tool writes at the top of an L1 file of that name."""
+    return text.startswith("\n".join(l1_head(name)) + "\n")
+
+
 def stale_generated(sd: StoreDir, record: Optional[Record], l1_name: str) -> dict[str, str]:
     """Earlier L1 files, written under another l1_name and unchanged since: name -> SHA-256.
 
     They are not memory files and stay out of the scan until deleted; one that was edited since
-    is an ordinary source again.
+    is an ordinary source again. The record alone is not trusted: a file also has to start with
+    the generated L1 head, so a crafted record cannot hide a memory file (or have it deleted).
     """
     if record is None:
         return {}
@@ -176,7 +181,7 @@ def stale_generated(sd: StoreDir, record: Optional[Record], l1_name: str) -> dic
             text = as_text(read_current(sd, name).data)
         except (SafeIOError, OSError):
             continue
-        if text is not None and sha256_text(text) == sha:
+        if text is not None and sha256_text(text) == sha and is_l1_text(text, name):
             found[name] = sha
     return found
 
@@ -222,14 +227,21 @@ def _backups(sd: StoreDir, prefix: str) -> list[tuple[tuple[str, int], str]]:
 
 
 def _holds(sd: StoreDir, name: str, data: bytes) -> bool:
-    """True when name is a regular, singly linked file whose content is exactly data."""
-    if sd.kind(name) != "file" or sd.nlink(name) != 1:
+    """True when name is a regular, singly linked file whose content is exactly data. The size is
+    compared first, so a file of another size is never read."""
+    try:
+        kind, size, _ = sd.entry_stat(name)
+    except FileNotFoundError:
         return False
-    return sd.fingerprint(name) == Fingerprint(len(data), hashlib.sha256(data).hexdigest())
+    if kind != "file" or size != len(data) or sd.nlink(name) != 1:
+        return False
+    found = sd.fingerprint(name)
+    return found is not None and found.sha256 == hashlib.sha256(data).hexdigest()
 
 
 def _prune_backups(sd: StoreDir, prefix: str, keep: str) -> None:
+    """Remove all but the newest backups; a backup is removed whatever it holds, so none is read."""
     keyed = [(key, name) for key, name in _backups(sd, prefix) if name != keep]
     for _, name in keyed[: max(0, len(keyed) - (BACKUPS_KEPT - 1))]:
         if sd.kind(name) == "file" and sd.nlink(name) == 1:
-            sd.remove(name, sd.fingerprint(name))
+            sd.remove(name, ANY)

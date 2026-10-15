@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence, Union
 
-from .frontmatter import PatchError, parse, patch
+from .frontmatter import PatchError, patch_checked
 from .items import MANUAL_NAME, PENDING_NAME, Manual, ManualLine, PendingEntry, manual_bytes, pending_bytes
 from .safeio import ConcurrentEdit, Fingerprint, StoreDir, UnsafeEntry
 from .segments import norm
@@ -49,10 +49,7 @@ def folded_text(src: Source, entry: PendingEntry) -> str:
     add: dict[str, Union[str, int]] = {
         "idx": entry.idx, "idx_section": entry.section, "idx_sub": entry.sub, "idx_order": entry.order,
     }
-    text = patch(src.text, add)
-    if norm(parse(text).get("idx") or "") != norm(entry.idx):
-        raise PatchError("it already has an 'idx' key that is empty or not a plain value")
-    return text
+    return patch_checked(src.text, add, check=("idx",))
 
 
 def _patch(sd: StoreDir, src: Source, entry: PendingEntry, out: Folded) -> bool:

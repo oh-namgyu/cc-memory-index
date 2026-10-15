@@ -7,18 +7,16 @@ generated files are replaced.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping, Optional, Sequence
 
 from .items import DEFAULT_SECTION, MANUAL_NAME, ORDER_LIMIT, PENDING_NAME, ManualLine, PendingEntry, default_idx
+from .links import memory_links
 from .render import Rendered, RenderInvariant, is_warning_line, l1_head, link_line, preamble_lines
 from .segments import BodyLine, Seg, body_lines, norm, pieces, split_head
 from .store import Source, valid_source_name
-from .text import sanitize
+from .text import sanitize, strip_bom
 
-_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
-_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 HINT = "edit the memory file's frontmatter (metadata.idx) instead"
 
 
@@ -49,9 +47,15 @@ class Context:
 
 @dataclass(frozen=True)
 class Unrescuable:
+    """A hand edit that cannot be kept. kind is one of the stable names below, for callers that must
+    not relay the (untrusted) segment or the reason quoting it: not-utf8, header-edited,
+    preamble-edited, several-links, unsafe-target, missing-target, edited-generated-line,
+    pending-target, duplicate-target."""
+
     file: str
     segment: str
     reason: str
+    kind: str
 
 
 @dataclass
@@ -65,11 +69,6 @@ class Rescue:
     lines: list[ManualLine] = field(default_factory=list)
     unrescuable: list[Unrescuable] = field(default_factory=list)
     pieces: dict[str, list[str]] = field(default_factory=dict)
-
-
-def memory_links(text: str) -> list[str]:
-    """Link targets that name a .md file (URLs with a scheme are not memory links)."""
-    return [t for t in _LINK.findall(text) if t.endswith(".md") and not _URL.match(t)]
 
 
 def default_pieces(sources: Iterable[Source]) -> frozenset[str]:
@@ -92,7 +91,7 @@ def _l0_head(preamble: Optional[str], l1_names: Sequence[str]) -> tuple[list[str
 
 
 def _split(text: str, l1: bool, preamble: Optional[str], l1_names: Sequence[str]) -> tuple[Optional[list[str]], str]:
-    lines = text.lstrip("\ufeff").split("\n")
+    lines = strip_bom(text).split("\n")
     if l1:
         return split_head(lines, l1_head(l1_names[0]), _no_extra)
     return split_head(lines, *_l0_head(preamble, l1_names))
@@ -117,34 +116,39 @@ def body_pieces(rendered: Rendered, preamble: Optional[str], l1_name: str) -> se
 def _body(ed: Edited, ctx: Context, out: Rescue) -> Optional[list[BodyLine]]:
     """The lines after the head, or None (recorded as unrescuable) when the head was edited."""
     if ed.text is None:
-        out.unrescuable.append(Unrescuable(ed.name, "", "not valid UTF-8; restore it or run `build --force`"))
+        out.unrescuable.append(Unrescuable(ed.name, "", "not valid UTF-8; restore it or run `build --force`",
+                                           "not-utf8"))
         return None
     l1 = ed.role == "l1"
     rest, differs = _split(ed.text, l1, ctx.preamble, ctx.l1_names)
     if rest is None:
-        reason = ("the generated header was edited; restore it or run `build --force`" if l1
-                  else f"preamble edited — change it in {MANUAL_NAME}")
-        out.unrescuable.append(Unrescuable(ed.name, differs, reason))
+        if l1:
+            out.unrescuable.append(Unrescuable(ed.name, differs, "the generated header was edited; restore it or"
+                                               " run `build --force`", "header-edited"))
+        else:
+            out.unrescuable.append(Unrescuable(ed.name, differs, f"preamble edited — change it in {MANUAL_NAME}",
+                                               "preamble-edited"))
         return None
     return body_lines(rest, l1)
 
 
-def _refusal(links: Sequence[str], ctx: Context, claimed: set[str]) -> Optional[str]:
-    """Why a segment that links to memory files cannot be rescued, or None when it can."""
+def _refusal(links: Sequence[str], ctx: Context, claimed: set[str]) -> Optional[tuple[str, str]]:
+    """(why, kind) when a segment that links to memory files cannot be rescued, or None when it can."""
     if len(links) > 1:
-        return f"links to {len(links)} memory files, so it cannot be one file's index line; {HINT}"
+        return f"links to {len(links)} memory files, so it cannot be one file's index line; {HINT}", "several-links"
     target = links[0]
     if not valid_source_name(target):
-        return f"link target {target[:80]!r} is not a memory file in this directory; {HINT}"
+        return f"link target {target[:80]!r} is not a memory file in this directory; {HINT}", "unsafe-target"
     src = ctx.sources.get(target)
     if src is None:
-        return f"{target} does not exist or could not be read; {HINT}"
+        return f"{target} does not exist or could not be read; {HINT}", "missing-target"
     if sanitize(src.fm.get("idx") or ""):
-        return f"{target} already has an index line (metadata.idx), so this is an edited generated line; {HINT}"
+        return (f"{target} already has an index line (metadata.idx), so this is an edited generated line; {HINT}",
+                "edited-generated-line")
     if target in ctx.pending_files:
-        return f"{target} already has a line waiting in {PENDING_NAME}; {HINT}"
+        return f"{target} already has a line waiting in {PENDING_NAME}; {HINT}", "pending-target"
     if target in claimed:
-        return f"another added line already links to {target}; {HINT}"
+        return f"another added line already links to {target}; {HINT}", "duplicate-target"
     return None
 
 
@@ -195,9 +199,9 @@ def analyse(edited: Sequence[Edited], ctx: Context) -> Rescue:
     unlinked: list[Seg] = []
     for name, seg in _added(edited, ctx, out):
         links = memory_links(seg.text)
-        reason = _refusal(links, ctx, claimed) if links else None
-        if reason is not None:
-            out.unrescuable.append(Unrescuable(name, seg.text, reason))
+        refusal = _refusal(links, ctx, claimed) if links else None
+        if refusal is not None:
+            out.unrescuable.append(Unrescuable(name, seg.text, *refusal))
         elif links:
             claimed.add(links[0])
             linked.append((links[0], seg))

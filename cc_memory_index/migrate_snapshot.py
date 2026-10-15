@@ -5,7 +5,7 @@ migration means to write; the notes file the migration creates has no before-has
 hash is recorded before the file is written, so a run that stops anywhere can still be restored:
 a file that holds its after-hash is put back (or removed, when the migration created it), one
 that holds its before-hash was never changed, and anything else was edited since and is left
-alone.
+alone. The render record gives only the hashes of MEMORY.md and the configured L1, never names.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Mapping, Optional, Tuple
 
 from .build import EXIT_CONCURRENT, EXIT_USAGE, BuildResult
-from .generated import MIGRATING_MARK, RECORD_MAX_BYTES, Record, as_text, read_current, read_record
+from .generated import MIGRATING_MARK, RECORD_MAX_BYTES, Current, Record, as_text, is_l1_text, read_current, read_record
 from .items import MANUAL_NAME, PENDING_NAME
 from .plan import Refusal
 from .safeio import Fingerprint, StoreDir
@@ -34,6 +34,7 @@ DATA_NAMES = (MANUAL_NAME, PENDING_NAME, CONFIG_NAME)
 _MANIFEST_KEYS = {"version", "created", "files", "manual_after"}
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 Target = Tuple[str, Optional[str], Optional[str]]
+Now = Tuple[Optional[Current], Optional[str]]
 UNKNOWN = ""  # an after-hash no file can have: the file is put back only if it still holds its before-hash
 
 
@@ -83,9 +84,8 @@ def parse_manifest(data: bytes, where: str) -> Manifest:
     bad = Refusal(EXIT_USAGE, f"{where} is not a migration manifest")
     if not isinstance(obj, dict) or set(obj) != _MANIFEST_KEYS or obj["version"] != MANIFEST_VERSION:
         raise bad
-    if type(obj["version"]) is not int or not isinstance(obj["created"], str) or not isinstance(obj["files"], dict):
-        raise bad
-    if not _sha_or_none(obj["manual_after"]):
+    if (type(obj["version"]) is not int or not isinstance(obj["created"], str) or not isinstance(obj["files"], dict)
+            or not _sha_or_none(obj["manual_after"])):
         raise bad
     files: dict[str, Entry] = {}
     for name, value in obj["files"].items():
@@ -169,12 +169,32 @@ def marker_ident(data: Optional[bytes]) -> Optional[str]:
     return text if SNAPSHOT_ID.match(text) else None
 
 
-def _generated(record: Optional[Record], cfg: Config) -> dict[str, Optional[str]]:
-    """Generated file name -> the hash build last wrote. Without a record it is UNKNOWN, not None:
-    a build that stopped before writing the record may still have written L0 or L1."""
-    if record is None:
-        return {L0_NAME: UNKNOWN, cfg.l1_name: UNKNOWN}
-    return {**record.stale, L0_NAME: record.l0, record.l1_name: record.l1}
+def _current(sd: StoreDir, name: str) -> Now:
+    """name as it is now (data None when missing), or why it is left alone. A file larger than any
+    copy a snapshot holds cannot hold a hash the migration recorded, so it is not read."""
+    kind = sd.kind(name)
+    if kind == "missing":
+        return Current(name, None, None), None
+    if kind != "file":
+        return None, f"{name} is not a regular file"
+    if sd.entry_stat(name)[1] > MANIFEST_MAX_BYTES:
+        return None, f"{name} changed after the migration"
+    return read_current(sd, name, MANIFEST_MAX_BYTES), None
+
+
+def _generated(record: Optional[Record], cfg: Config, l1: Optional[Current]) -> dict[str, Optional[str]]:
+    """MEMORY.md and the configured L1 -> the hash build last wrote (UNKNOWN without a record: a build
+    that stopped before writing it may still have written them). The names never come from the record,
+    and an L1 that does not start with the generated head is left to the manifest alone."""
+    l0_sha = l1_sha = UNKNOWN
+    if record is not None:
+        l0_sha = record.l0
+        l1_sha = record.l1 if record.l1_name == cfg.l1_name else record.stale.get(cfg.l1_name, UNKNOWN)
+    found: dict[str, Optional[str]] = {L0_NAME: l0_sha}
+    text = None if l1 is None else as_text(l1.data)
+    if l1 is None or l1.data is None or (text is not None and is_l1_text(text, cfg.l1_name)):
+        found[cfg.l1_name] = l1_sha
+    return found
 
 
 def _targets(manifest: Manifest, generated: Mapping[str, Optional[str]]) -> list[Target]:
@@ -188,39 +208,40 @@ def _targets(manifest: Manifest, generated: Mapping[str, Optional[str]]) -> list
     return out
 
 
-def _put_back(sd: StoreDir, snap: StoreDir, target: Target) -> tuple[bool, Optional[str]]:
-    """Restore one file when it still holds its after-hash: (changed, conflict message or None).
-
-    after is None for a file the migration never meant to write, which is always left as it is.
-    """
+def _put_back(sd: StoreDir, snap: StoreDir, target: Target, now: Now) -> tuple[bool, Optional[str]]:
+    """Restore one file, as read once (now), if it holds its after-hash: (changed, conflict or None).
+    The replace or remove checks the file again (DESIGN §7.3)."""
     name, before, after = target
-    if after is None:
+    current, problem = now
+    if current is None:
+        return False, problem
+    sha = None if current.fp is None else current.fp.sha256
+    if sha == before:
         return False, None
-    if sd.kind(name) not in ("file", "missing"):
-        return False, f"{name} is not a regular file"
-    current = sd.fingerprint(name)
-    now = current.sha256 if current else None
-    if now == before:
-        return False, None
-    if now != after:
+    if sha != after:
         return False, f"{name} changed after the migration"
     if before is None:
-        sd.remove(name, current)
+        sd.remove(name, current.fp)
         return True, None
     if snap.kind(name) != "file":
         return False, f"the snapshot has no copy of {name}"
-    data, _ = snap.read(name, MANIFEST_MAX_BYTES)
-    if sha256(data) != before:
+    data, copy = snap.read(name, MANIFEST_MAX_BYTES)
+    if copy.sha256 != before:
         return False, f"the snapshot copy of {name} does not match its recorded hash"
-    sd.replace(name, data, current)
+    sd.replace(name, data, current.fp)
     return True, None
 
 
-def _put_all_back(sd: StoreDir, snap: StoreDir, targets: list[Target]) -> tuple[list[str], dict[str, str]]:
+def _put_all_back(sd: StoreDir, snap: StoreDir, targets: list[Target],
+                  read: Mapping[str, Now]) -> tuple[list[str], dict[str, str]]:
+    """Restore every target; one the migration never meant to write (after None) is not even read."""
     restored: list[str] = []
     conflicts: dict[str, str] = {}
     for target in targets:
-        changed, problem = _put_back(sd, snap, target)
+        if target[2] is None:
+            continue
+        now = read[target[0]] if target[0] in read else _current(sd, target[0])
+        changed, problem = _put_back(sd, snap, target, now)
         if problem:
             conflicts[target[0]] = problem
         elif changed:
@@ -242,8 +263,9 @@ def _undo(sd: StoreDir, snap: StoreDir, manifest: Manifest, cfg: Config) -> tupl
     """Put files back, then drop the render record unless a generated file was left alone."""
     record = read_current(sd, RENDER_MARK, RECORD_MAX_BYTES)
     parsed = read_record(record)
-    generated = _generated(parsed, cfg)
-    restored, conflicts = _put_all_back(sd, snap, _targets(manifest, generated))
+    read = {cfg.l1_name: _current(sd, cfg.l1_name)}
+    generated = _generated(parsed, cfg, read[cfg.l1_name][0])
+    restored, conflicts = _put_all_back(sd, snap, _targets(manifest, generated), read)
     if record.data is not None and parsed is None:
         conflicts[RENDER_MARK] = f"{RENDER_MARK} is malformed, so the generated files were not restored"
     elif record.data is not None and not set(conflicts) & set(generated):

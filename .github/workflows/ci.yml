@@ -34,6 +34,19 @@ jobs:
       - name: Install test runner
         run: python -m pip install --disable-pip-version-check pytest
 
+      # Static checks once per OS. mypy 1.20.2 is the last release that accepts --python-version 3.9.
+      - name: Install static checkers
+        if: matrix.python-version == '3.12'
+        run: python -m pip install --disable-pip-version-check pyflakes==4.0.3 mypy==1.20.2
+
+      - name: Pyflakes
+        if: matrix.python-version == '3.12'
+        run: python -m pyflakes cc_memory_index hooks scripts tests
+
+      - name: Type check
+        if: matrix.python-version == '3.12'
+        run: python -m mypy --strict --python-version 3.9 cc_memory_index
+
       - name: Forbidden-API gate
         run: python scripts/check_forbidden.py
 

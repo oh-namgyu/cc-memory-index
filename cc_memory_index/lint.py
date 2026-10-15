@@ -15,15 +15,14 @@ from .fold import folded_text
 from .frontmatter import PatchError, locate
 from .generated import as_text
 from .items import MANUAL_NAME, PENDING_NAME, Item, PendingEntry
+from .links import memory_links
 from .plan import Plan, Refusal, prepare, skip_notes
-from .render import Rendered, nbytes, reachable
+from .render import Rendered, item_bytes, reachable
 from .safeio import StoreDir
 from .store import L0_NAME, Config, ScanResult, Source, load_config, valid_source_name
 from .text import sanitize
 
 EXIT_ERRORS = 1
-_LINK = re.compile(r"\]\(\s*<?([^)\s>]+)>?")
-_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 _WIKI = re.compile(r"\[\[([^\[\]|#\n]+)(?:[|#][^\[\]\n]*)?\]\]")
 
 
@@ -40,29 +39,17 @@ def _check_scan(scanned: ScanResult, found: Findings) -> None:
         else:
             found.warnings.append(f"{name!r} is not a valid memory file name, so it is not indexed")
     for src in scanned.sources:
-        named = src.fm.get("name")
         if not src.fm.ok:
             found.errors.append(f"{src.name}: frontmatter cannot be parsed ({src.fm.error})")
         elif not src.fm.present:
             found.warnings.append(f"{src.name} has no frontmatter: it is indexed by its file name only")
-        elif named is not None and named != src.name[: -len(".md")]:
-            found.warnings.append(f"{src.name}: frontmatter name {named!r} differs from the file name")
-
-
-def _link_targets(text: str) -> list[str]:
-    targets: list[str] = []
-    for m in _LINK.finditer(text):
-        target = m.group(1).split("#", 1)[0]
-        if target.endswith(".md") and not _SCHEME.match(target) and target not in targets:
-            targets.append(target)
-    return targets
 
 
 def _check_links(sd: StoreDir, texts: dict[str, Optional[str]], found: Findings) -> set[str]:
     """Report dangling .md links in the generated files; returns the plain names linked."""
     linked: set[str] = set()
     for generated, text in texts.items():
-        for target in _link_targets(text or ""):
+        for target in dict.fromkeys(memory_links(text or "")):
             if not valid_source_name(target):
                 found.warnings.append(f"{generated} links to {target!r}, which is not a file in the store")
                 continue
@@ -167,12 +154,13 @@ def _check_wiki(scanned: ScanResult, found: Findings) -> None:
 
 def _check_oversized(items: list[Item], cfg: Config, found: Findings) -> None:
     for it in items:
-        size = nbytes(it.idx)
+        size = item_bytes(it)
         if it.resident and it.origin != "pending" and size > cfg.item_max_bytes:
             label = it.file or f"{it.idx[:40]!r} in {MANUAL_NAME}"
             found.warnings.append(
-                f"{label}: idx is {size} bytes, over item_max_bytes ({cfg.item_max_bytes}), so it is listed under"
-                f" Overflow in {cfg.l1_name}: shorten it or demote the memory"
+                f"{label}: idx, idx_section and idx_sub are {size} bytes together, over item_max_bytes"
+                f" ({cfg.item_max_bytes}), so it is listed under Overflow in {cfg.l1_name}: shorten them or demote"
+                " the memory"
             )
 
 

@@ -73,6 +73,8 @@ def test_quoted_values_and_escapes() -> None:
         "k: # only a comment\n"
         "---\n"
     )
+    with pytest.raises(PatchError, match="line 5 opens a quoted value"):
+        patch(text, {"idx": "x"})
     assert parse(text).top == {
         "a": 'say "hi" \\ back',
         "b": "it's",
@@ -268,3 +270,4 @@ def test_file_without_frontmatter_gets_a_block() -> None:
 def test_unpatchable_frontmatter_raises(text: str) -> None:
     with pytest.raises(PatchError):
         patch(text, {"idx": "y"})
+

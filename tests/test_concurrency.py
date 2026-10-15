@@ -56,10 +56,10 @@ def _record_windows(windows: list[list[int]], held: list[list[int]]) -> None:
     started = [0]
     real_verify, real_replace, real_lock = StoreDir._verify, os.replace, StoreDir.lock
 
-    def verify(sd: StoreDir, name: str, expect: Any) -> Any:
+    def verify(sd: StoreDir, name: str, expect: Any, content: bool = True) -> Any:
         if name == L0:
             started[0] = _now()
-        return real_verify(sd, name, expect)
+        return real_verify(sd, name, expect, content)
 
     def rename(src: Any, dst: Any, **kwargs: Any) -> None:
         real_replace(src, dst, **kwargs)

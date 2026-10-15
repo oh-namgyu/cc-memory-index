@@ -5,3 +5,4 @@ __pycache__/
 build/
 dist/
 .venv/
+.mypy_cache/

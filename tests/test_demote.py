@@ -126,3 +126,16 @@ def test_demote_files_stops_at_the_first_failure(tmp_path: Path) -> None:
     res = demote_files(str(root), ["x.md", "missing.md", "tea.md"])
     assert res.code == 2 and res.stats["demoted"] == ["x.md"]
     assert parse((root / "tea.md").read_text(encoding="utf-8")).get("tier") == "resident"
+
+
+def test_a_tier_that_would_push_the_fence_out_of_the_window_is_refused(tmp_path: Path) -> None:
+    """Audit PoC 3d: demote wrote a file whose closing '---' then lay beyond the 64 KiB window."""
+    root = built_store(tmp_path)
+    head, tail = "---\nname: big\ndescription: ", '\nmetadata:\n  tier: resident\n  idx: "[Big](big.md) — big"\n---\n'
+    text = head + "x" * (frontmatter.WINDOW_BYTES - len((head + tail).encode())) + tail + "body\n"
+    assert parse(text).ok and parse(text).get("tier") == "resident"
+    (root / "big.md").write_bytes(text.encode("utf-8"))
+    before = snapshot(root)
+    res = run_demote(str(root), "big.md")
+    assert res.code == 7 and res.stats["demoted"] == [] and snapshot(root) == before
+    assert res.messages[0].startswith("big.md: the tier cannot be set safely (the patched frontmatter would not parse")

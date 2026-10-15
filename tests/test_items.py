@@ -60,7 +60,7 @@ def test_top_level_keys_and_metadata_precedence() -> None:
 
 
 def test_text_is_sanitised() -> None:
-    src = source("a.md", idx="line two\tthree\x00", idx_section="Sec\x7ftion", idx_sub=" sub ")
+    src = source("a.md", idx="line\u2028two\tthree\x00", idx_section="Sec\x7ftion", idx_sub=" sub ")
     (it,) = items_from_sources([src], [])
     assert (it.idx, it.section, it.sub) == ("line two three", "Section", "sub")
 

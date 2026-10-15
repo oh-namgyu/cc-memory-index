@@ -25,7 +25,8 @@ TEMP_MIN_AGE_NS = 10 * 60 * 10**9
 
 
 def _check_name(name: str) -> None:
-    if not isinstance(name, str) or name in ("", ".", "..") or any(c in name for c in "/\\\x00"):
+    """A plain entry name: no separator, NUL or ':' (which names an alternate data stream on Windows)."""
+    if not isinstance(name, str) or name in ("", ".", "..") or any(c in name for c in "/\\\x00:"):
         raise UnsafeEntry(f"not a plain entry name: {name!r}")
 
 
@@ -161,8 +162,9 @@ class StoreDir:
         except FileNotFoundError:
             return None
 
-    def _verify(self, name: str, expect: Expect) -> Optional[os.stat_result]:
-        """Refuse unsafe targets and changed content; returns the target's lstat or None."""
+    def _verify(self, name: str, expect: Expect, content: bool = True) -> Optional[os.stat_result]:
+        """Refuse unsafe targets and changed content (only its size unless content); returns the
+        target's lstat or None."""
         try:
             st: Optional[os.stat_result] = self._lstat(name)
         except FileNotFoundError:
@@ -177,14 +179,16 @@ class StoreDir:
             raise UnsafeEntry(f"{name} has {st.st_nlink} hard links")
         if expect is None:
             raise ConcurrentEdit(f"{name} appeared after it was checked")
-        if isinstance(expect, Fingerprint) and (st.st_size != expect.size or self.fingerprint(name) != expect):
+        changed = isinstance(expect, Fingerprint) and (
+            st.st_size != expect.size or (content and self.fingerprint(name) != expect))
+        if changed:
             raise ConcurrentEdit(f"{name} was edited after it was read")
         return st
 
     def replace(self, name: str, data: bytes, expect: Expect) -> Fingerprint:
         """Atomically replace one entry; expect is its Fingerprint, None (must not exist) or ANY."""
         _check_expect(expect)
-        st = self._verify(name, expect)
+        st = self._verify(name, expect, content=False)  # the full check comes right before the rename
         tmp = f".{name}.tmp-{secrets.token_hex(8)}"
         fd = self._open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:

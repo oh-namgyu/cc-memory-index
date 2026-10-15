@@ -191,8 +191,9 @@ def test_already_migrated_store_is_left_unchanged(tmp_path: Path) -> None:
     before = tree(root)
     for apply in (False, True):
         res = run_migrate(str(root), apply=apply)
-        assert res.code == 0 and "already uses" in res.messages[0] and tree(root) == before
-    assert summary(res) == ["this store already uses the generated index: nothing to migrate"]
+        assert res.code == 0 and tree(root) == before
+        assert res.messages == ["this store already uses the generated index: nothing to migrate"]
+    assert summary(res) == []
 
 
 def test_tiered_store_never_built_is_built_by_apply_only(tmp_path: Path) -> None:
@@ -251,7 +252,7 @@ def test_sources_that_cannot_take_the_line(tmp_path: Path) -> None:
                                        "idx_section": "S", "idx_sub": ""}
     assert (root / "unclosed.md").read_text(encoding="utf-8") == "---\nname: never closed\n" and "tier" not in _meta(root, "hard.md")
     notes = " ".join(res.messages)
-    assert "different idx" in notes and "cannot be patched" in notes and "hard link" in notes
+    assert "'idx' key already holds a different" in notes and "cannot be patched" in notes and "hard link" in notes
 
 
 def test_index_that_is_not_utf8_is_refused(tmp_path: Path) -> None:
@@ -269,3 +270,4 @@ def test_configuration_errors_exit_2(tmp_path: Path, name: str, content: str) ->
     root = _store(tmp_path, "## S\n- [A](a.md) — x\n", "a.md")
     (root / name).write_text(content, encoding="utf-8")
     assert run_migrate(str(root), apply=True).code == 2 and "tier" not in _meta(root, "a.md")
+

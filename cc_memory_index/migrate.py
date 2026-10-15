@@ -19,10 +19,11 @@ from .build import (
     EXIT_CONCURRENT, EXIT_INVARIANT, EXIT_OK, EXIT_OVERFLOW, EXIT_PARSE, EXIT_USAGE, BuildResult, build_locked,
     new_result, outcome, writing,
 )
-from .generated import MIGRATING_MARK, Current, as_text, read_current
+from .generated import MIGRATING_MARK, Current, as_text, needs_migration, read_current
 from .items import MANUAL_NAME, PENDING_NAME, load_manual, load_pending
+from .links import memory_links
 from .migrate_notes import first_missing, notes_name
-from .migrate_plan import Plan, make_plan, manual_bytes, memory_links, missing_segments, preview, render_store
+from .migrate_plan import Plan, make_plan, manual_file, missing_segments, preview, render_store
 from .migrate_snapshot import MARKER_MAX_BYTES, SNAPSHOT_PREFIX, Snapshot, marker_ident, new_snapshot_id
 from .migrate_snapshot import restore as restore_snapshot
 from .plan import Refusal
@@ -34,26 +35,23 @@ from .store import CONFIG_NAME, L0_NAME, RENDER_MARK, SOURCE_MAX_BYTES, Config, 
 EXIT_INCOMPLETE = 1
 RERUN = "run `cc-memory-index migrate --apply` again"
 ALREADY = "this store already uses the generated index: nothing to migrate"
-UNBUILT = "this store is already migrated (index frontmatter or manual lines), but the index was never built"
+UNBUILT = ("nothing to migrate: MEMORY.md holds no hand-written index (or this store was migrated already),"
+           " but the index was never built")
 
 
-def _scan(sd: StoreDir, cfg: Config) -> ScanResult:
-    return scan(sd, cfg, {L0_NAME, cfg.l1_name})
+def _format_state(sd: StoreDir) -> Optional[str]:
+    """'built', 'unbuilt' or None for a hand-written store (DESIGN §8).
 
-
-def _format_state(sd: StoreDir, scanned: ScanResult) -> Optional[str]:
-    """'built', 'unbuilt' or None for a hand-written store.
-
-    'unbuilt' means no render record but a tier or a manual-lines file: migrated already (an index
-    that links no memory file migrates into manual lines only) and never built. build makes the
-    same distinction (generated.needs_migration), so a rerun after the first build failed builds
-    instead of migrating the generated MEMORY.md again.
+    Only files that this tool writes decide it, the same way build does (generated.needs_migration):
+    'built' with a render record; 'unbuilt' with a manual-lines file (every migrate --apply writes
+    one), so a rerun after the first build failed builds instead of migrating the generated
+    MEMORY.md again, or with a MEMORY.md that holds nothing written by hand. A tier set by hand in
+    a memory file is not a sign of a migration.
     """
     if sd.kind(RENDER_MARK) != "missing":
         return "built"
-    if sd.kind(MANUAL_NAME) != "missing" or any(src.fm.get("tier") is not None for src in scanned.sources):
-        return "unbuilt"
-    return None
+    has_manual = sd.kind(MANUAL_NAME) != "missing"
+    return None if needs_migration(read_current(sd, L0_NAME).data, False, has_manual) else "unbuilt"
 
 
 def _require_all(plan: Plan, rendered: Rendered, notes: Optional[str], code: int, hint: str) -> None:
@@ -84,7 +82,6 @@ def _checked_plan(sd: StoreDir, cfg: Config, scanned: ScanResult, index: Optiona
     if text is None:
         raise Refusal(EXIT_USAGE, f"{L0_NAME} is not valid UTF-8: convert it before migrating")
     blocked = {src.name for src in scanned.sources if sd.nlink(src.name) > 1}
-    load_manual(sd)
     plan = make_plan(text, scanned.sources, blocked, _notes_name(sd, cfg, text, created))
     notes = plan.notes_file()
     if notes is not None and len(notes[1].encode("utf-8")) > SOURCE_MAX_BYTES:
@@ -118,12 +115,12 @@ def _dry_run(sd: StoreDir, cfg: Config, res: BuildResult) -> None:
     res.stats["mode"] = "dry run"
     if sd.kind(MIGRATING_MARK) != "missing":
         raise Refusal(EXIT_INCOMPLETE, f"{MIGRATING_MARK} exists: a migration was interrupted; {RERUN}")
-    scanned = _scan(sd, cfg)
-    state = _format_state(sd, scanned)
+    state = _format_state(sd)
     if state is not None:
         res.stats["already"] = state
         res.messages.append(ALREADY if state == "built" else f"{UNBUILT}: run `cc-memory-index build`")
         return
+    scanned = scan(sd, cfg)
     plan, rendered = _checked_plan(sd, cfg, scanned, read_current(sd, L0_NAME).data)
     res.messages.extend(plan.messages)
     res.stats.update(_describe(plan, rendered, cfg, scanned.sources))
@@ -156,7 +153,7 @@ def _write(sd: StoreDir, cfg: Config, snapshot: Snapshot, scanned: ScanResult) -
     notes = plan.notes_file()
     if notes is not None:
         snapshot.intend_new(manifest, notes[0], notes[1].encode("utf-8"))
-    new_manual = manual_bytes(plan)
+    new_manual = manual_file(plan)
     snapshot.intend_manual(manifest, manual.data, new_manual)
     snapshot.save(manifest)
     if manual.data != new_manual:
@@ -177,7 +174,7 @@ def _start(sd: StoreDir, cfg: Config, scanned: ScanResult, res: BuildResult) -> 
             raise Refusal(EXIT_USAGE, f"{MIGRATING_MARK} does not name a snapshot: remove it, or restore a snapshot")
         res.messages.append(f"resuming the interrupted migration {ident}")
         return ident, marker.fp
-    state = _format_state(sd, scanned)
+    state = _format_state(sd)
     if state is not None:
         res.stats["already"] = state
         res.messages.append(ALREADY if state == "built" else f"{UNBUILT}: building it now")
@@ -208,7 +205,7 @@ def _build(sd: StoreDir, cfg: Config, res: BuildResult, moved: Optional[Abstract
 def _apply(sd: StoreDir, cfg: Config, res: BuildResult) -> None:
     """--apply: migrate (or build a store migrated but never built), write the index, remove the marker."""
     res.stats["mode"] = "apply"
-    scanned = _scan(sd, cfg)
+    scanned = scan(sd, cfg)
     started = _start(sd, cfg, scanned, res)
     if started is None:
         if res.stats["already"] == "unbuilt":
@@ -220,7 +217,7 @@ def _apply(sd: StoreDir, cfg: Config, res: BuildResult) -> None:
         res.stats["temp_removed"] += snap.sweep_temp()
         plan = _write(sd, cfg, Snapshot(snap, ident), scanned)
     res.messages.extend(plan.messages)
-    fresh = _scan(sd, cfg)
+    fresh = scan(sd, cfg)
     rendered = render_store(fresh.sources, load_manual(sd), load_pending(sd), cfg)
     undo = f"{MIGRATING_MARK} is kept; undo with `cc-memory-index migrate --restore {ident}`"
     notes = None if plan.notes_name is None else as_text(read_current(sd, plan.notes_name).data)
@@ -257,13 +254,12 @@ def run_migrate(store_path: str, apply: bool = False, restore: Optional[str] = N
 
 
 def summary(res: BuildResult) -> list[str]:
-    """Human summary of a migrate result for stdout."""
+    """Human summary of a migrate result, after its messages (which it does not repeat); the caller
+    adds the exit line."""
     s = res.stats
     lines: list[str] = []
     if s.get("mode") == "restore":
         lines.append(f"restored {len(s['restored'])} file(s) from {s['snapshot']}; {len(s['conflicts'])} left alone")
-    elif "already" in s:
-        lines.append(ALREADY if s["already"] == "built" else UNBUILT)
     elif "resident" in s:
         dry = s["mode"] == "dry run"
         lines += [
@@ -280,6 +276,4 @@ def summary(res: BuildResult) -> list[str]:
             f"snapshot {s['snapshot']}: undo with `cc-memory-index migrate --restore"
             f" {s['snapshot'][len(SNAPSHOT_PREFIX):]}`",
         ]
-    if res.code != EXIT_OK or not lines:
-        lines.append(f"migrate: exit {res.code}")
     return lines

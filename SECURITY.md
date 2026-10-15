@@ -4,8 +4,11 @@
 
 cc-memory-index reads and writes files in one directory: a Claude Code auto-memory store. It
 makes no network requests, starts no processes, and never evaluates anything it reads. A CI gate
-(`scripts/check_forbidden.py`) fails the build if network, process or dynamic-code APIs appear
-in the package.
+(`scripts/check_forbidden.py`) reads the syntax tree of the package and of the plugin hook. It
+fails the build on any import outside an allowlist of standard-library modules, on
+process-creation or interpreter-introspection attributes (`os.system`, `os.posix_spawn`,
+`sys.modules`, …), on `eval`, `exec`, `compile`, `__import__` or `__builtins__`, and on
+`getattr`-style access with a computed name.
 
 The Claude Code hook acts only on a store that already contains `.index-render.json`, which
 this tool writes the first time you run `build` or `migrate --apply` there. Installing the
@@ -17,13 +20,23 @@ Memory files are written by Claude, and Claude reads web pages and documents tha
 steer it. Everything in a memory file is therefore treated as **untrusted data**:
 
 * Frontmatter is read by a strict subset parser. There is no YAML loader, `eval` or `pickle`.
-* Text that becomes an index line is reduced to a single line (line breaks, NEL, U+2028/U+2029
-  and control characters removed) before it is written anywhere, so it cannot add headings,
-  close a frontmatter block or add keys.
+* Text that becomes an index line is reduced to a single line (line breaks, NEL, U+2028/U+2029,
+  control characters, bidirectional controls and U+FEFF removed) before it is written anywhere,
+  so it cannot add headings, close a frontmatter block or add keys. The frontmatter patcher
+  refuses any frontmatter whose structure it does not fully understand, and re-parses every patch
+  before writing it.
+* A crafted `.index-render.json` cannot hide a memory file or make `migrate --restore` remove or
+  revert one: generated files are recognised by their header, and restore takes no names from the
+  record. A crafted `.memory-index.json` cannot point `l1_name` at a memory file either.
+* Link extraction runs in linear time, so no index line can stall the hook.
 * Link targets taken from index text must be plain file names in the store. A path such as
-  `../../.ssh/id_rsa.md` is ignored and reported, never opened.
+  `../../.ssh/id_rsa.md` is never opened: `build` refuses a hand-added line that points there
+  (exit 3, nothing written) and `migrate` keeps such a line as plain text.
 * Nothing is truncated: text that is too long for `MEMORY.md` is listed in the on-demand index
   instead. The tool moves content; it never amplifies it.
+* The hook tells Claude what happened through `additionalContext` in fixed sentences with counts
+  and validated memory file names only. Text read from the store is never relayed, so a crafted
+  file cannot use the hook to put instructions in front of Claude.
 * `migrate` moves the text of a hand-written `MEMORY.md` that is not an index line verbatim into
   the body of a new memory file, below a frontmatter block the tool writes itself, so that text
   cannot add frontmatter keys or index headings. It is then no longer loaded every session; only

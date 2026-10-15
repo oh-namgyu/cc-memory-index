@@ -13,7 +13,8 @@ from storekit import built_store, make_store, sample_store, snapshot, write_json
 from cc_memory_index import plan as plan_mod
 from cc_memory_index.build import run_build, run_check
 from cc_memory_index.items import MANUAL_NAME, PENDING_NAME
-from cc_memory_index.render import link_line
+from cc_memory_index.migrate import run_migrate
+from cc_memory_index.render import NOTE, TITLE, link_line
 from cc_memory_index.safeio import StoreDir
 
 L0, L1, MARK = "MEMORY.md", "index-l1.md", ".index-render.json"
@@ -73,12 +74,30 @@ def test_unmigrated_store_is_refused(tmp_path: Path) -> None:
     assert snapshot(root) == before
 
 
-@pytest.mark.parametrize("text", ["", "\n\n", "# Memory Index\n", "﻿# Title\n\n"])
+@pytest.mark.parametrize("text", ["", "\n\n", "# Memory Index\n", "\ufeff# Memory Index\n\n", f"{TITLE}\n\n{NOTE}\n"])
 def test_empty_or_title_only_memory_md_is_fine(tmp_path: Path, text: str) -> None:
     root = sample_store(tmp_path)
     (root / L0).write_text(text, encoding="utf-8")
     assert run_build(str(root), False).code == 0
     assert link_line(L1) in (root / L0).read_text(encoding="utf-8")
+
+
+def test_level_one_lines_by_hand_are_content(tmp_path: Path) -> None:
+    """Only blank lines and this tool's own titles are no content: '# Always use pnpm' was once
+    overwritten without a rescue or a backup (audit PoC 9)."""
+    text = "# Always use pnpm, never npm\n# Never deploy on Fridays\n#\n"
+    root = sample_store(tmp_path)
+    (root / L0).write_text(text, encoding="utf-8")
+    before = snapshot(root)
+    res = run_build(str(root), False)
+    assert res.code == 2 and "migrate" in res.messages[-1] and snapshot(root) == before
+    assert run_migrate(str(root), apply=True).code == 0
+    assert (root / L0).read_text(encoding="utf-8").startswith(text + "\n" + link_line(L1) + "\n")
+    (root / L0).write_text("# Remember: the staging DB password rotates monthly\n", encoding="utf-8")
+    before = snapshot(root)
+    res = run_build(str(root), False)
+    assert res.code == 3 and "preamble edited" in res.messages[0] and snapshot(root) == before
+    assert run_build(str(root), True).code == 0 and len(res.stats["unrescuable"]) == 1
 
 
 def test_migration_marker_blocks_every_command(tmp_path: Path) -> None:

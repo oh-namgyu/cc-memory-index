@@ -157,7 +157,7 @@ def test_directories_and_special_files_are_refused(sd: StoreDir) -> None:
             sd.replace("f.md", b"x", ANY)
 
 
-@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "..\\x", "a\x00b"])
+@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "..\\x", "a\x00b", "a.md:stream", ":"])
 def test_names_must_be_plain(sd: StoreDir, name: str) -> None:
     for call in (lambda: sd.read(name), lambda: sd.kind(name), lambda: sd.replace(name, b"x", ANY)):
         with pytest.raises(UnsafeEntry):

@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import pytest
 from storekit import append, built_store, claude_adds_memory, make_store, snapshot, write_json, write_memory
@@ -58,21 +58,22 @@ def test_unpatchable_target_stays_pending_and_listed(tmp_path: Path) -> None:
 def test_target_edited_between_scan_and_patch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = built_store(tmp_path)
     line = claude_adds_memory(root)
-    real = fold_mod.patch
+    real = fold_mod.patch_checked
 
-    def racing(text: str, add: Mapping[str, Any], replace: Optional[Mapping[str, str]] = None) -> str:
-        out = real(text, add, replace)
+    def racing(text: str, add: Mapping[str, Any], replace: Optional[Mapping[str, str]] = None,
+               check: Sequence[str] = ()) -> str:
+        out = real(text, add, replace, check)
         append(root, "new_note.md", "written meanwhile\n")
         return out
 
-    monkeypatch.setattr(fold_mod, "patch", racing)
+    monkeypatch.setattr(fold_mod, "patch_checked", racing)
     res = run_build(str(root), False)
     assert res.code == 4 and "new_note.md" in res.messages[-1] and "run again" in res.messages[-1]
     assert [e["file"] for e in _pending(root)] == ["new_note.md"]
     note = (root / "new_note.md").read_text(encoding="utf-8")
     assert parse(note).get("idx") is None and note.endswith("written meanwhile\n")
     assert line in (root / L1).read_text(encoding="utf-8") and line not in (root / L0).read_text(encoding="utf-8")
-    monkeypatch.setattr(fold_mod, "patch", real)
+    monkeypatch.setattr(fold_mod, "patch_checked", real)
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["written"] == ["new_note.md", PENDING_NAME]
     assert parse((root / "new_note.md").read_text(encoding="utf-8")).get("idx") == line[2:] and _pending(root) == []

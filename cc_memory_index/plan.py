@@ -12,6 +12,7 @@ from .generated import (
     RECORD_MAX_BYTES,
     Current,
     Record,
+    is_l1_text,
     needs_migration,
     read_current,
     read_record,
@@ -21,6 +22,9 @@ from .items import Item, Manual, items_from_sources, manual_items, read_manual, 
 from .render import Rendered, RenderInvariant, nbytes, reachable, render
 from .safeio import StoreDir
 from .store import L0_NAME, RENDER_MARK, Config, ScanResult, scan, valid_source_name
+
+
+USAGE_ERROR = 2  # exit code of a usage or configuration error; build re-exports it as EXIT_USAGE
 
 
 class Refusal(Exception):
@@ -99,7 +103,7 @@ def _stats(cfg: Config, inputs: Inputs, items: Sequence[Item], rendered: Rendere
 def _read_inputs(sd: StoreDir, cfg: Config, record: Optional[Record], notes: list[str]) -> Inputs:
     stale = stale_generated(sd, record, cfg.l1_name)
     notes.extend(f"stale generated file {name}: delete it (the L1 file is now {cfg.l1_name})" for name in stale)
-    scanned = scan(sd, cfg, {L0_NAME, cfg.l1_name, *stale})
+    scanned = scan(sd, cfg, set(stale))
     manual, manual_fp = read_manual(sd)
     pending, pending_fp = read_pending(sd)
     return Inputs(scanned, DataFiles(manual, manual_fp, pending, pending_fp), stale)
@@ -132,13 +136,23 @@ def prepare(sd: StoreDir, cfg: Config, refuse: int, stats: dict[str, Any], notes
     l0, l1 = read_current(sd, L0_NAME), read_current(sd, cfg.l1_name)
     record = read_current(sd, RENDER_MARK, RECORD_MAX_BYTES)
     parsed = read_record(record)
+    refuse_foreign_l1(l1, parsed, cfg.l1_name)
     inputs = _read_inputs(sd, cfg, parsed, notes)
-    if needs_migration(l0, record, inputs.scanned.sources, inputs.data.manual_fp is not None):
+    if needs_migration(l0.data, record.data is not None, inputs.data.manual_fp is not None):
         raise Refusal(refuse, f"{L0_NAME} was written by hand: run `cc-memory-index migrate` first")
     skipped = skip_notes(inputs.scanned)
     notes += skipped
     items, rendered = _render(inputs, cfg, stats, notes)
     return Plan(inputs, items, rendered, l0, l1, record, parsed, bool(skipped))
+
+
+def refuse_foreign_l1(l1: Current, record: Optional[Record], l1_name: str) -> None:
+    """l1_name must not name a file this tool never wrote (DESIGN §9). Otherwise a config file
+    in the store, which Claude can write, could have a memory overwritten, even with --force."""
+    if l1.data is None or (record is not None and record.l1_name == l1_name):
+        return
+    if not is_l1_text(l1.data.decode("utf-8", "replace"), l1_name):
+        raise Refusal(USAGE_ERROR, f"l1_name names {l1_name}, which this tool did not generate: choose another name")
 
 
 def rerender(sd: StoreDir, cfg: Config, plan: Plan, stats: dict[str, Any], notes: list[str]) -> Plan:

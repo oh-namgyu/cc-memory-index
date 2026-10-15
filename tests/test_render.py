@@ -18,6 +18,7 @@ from cc_memory_index.render import (
     Rendered,
     fill,
     head_lines,
+    item_bytes,
     link_line,
     nbytes,
     reachable,
@@ -140,11 +141,23 @@ def test_fixed_cost_rejection() -> None:
     with pytest.raises(BudgetError, match="fixed part"):
         render([], None, Config(budget_bytes=2048, item_max_bytes=2000))
     with pytest.raises(BudgetError):
-        render([], "\n".join(f"line {n}" for n in range(155)), Config())
+        render([], "\n".join(f"line {n}" for n in range(153)), Config())
     with pytest.raises(BudgetError):
-        render([], "p" * 19171, Config())
-    render([], "\n".join(f"line {n}" for n in range(154)), Config())
-    render([], "p" * 19170, Config())
+        render([], "p" * 19170, Config())
+    render([], "\n".join(f"line {n}" for n in range(152)), Config())
+    render([], "p" * 19169, Config())
+
+
+def test_fixed_cost_counts_an_item_with_both_headings_at_the_cap() -> None:
+    cfg = Config(budget_bytes=2048, budget_lines=20, item_max_bytes=1000)
+    preamble = "p" * (2048 - 1000 - 14 - 1 - len(head_lines("", L1)[-1].encode()) - 2
+                      - len(warning_line(0, L1).encode()) - 1)
+    largest = item("x" * 998, "S", "U", file="x.md")
+    assert item_bytes(largest) == 1000
+    r = render([largest], preamble, cfg)
+    assert r.overflow == [] and nbytes(r.l0) == 2048 - len(warning_line(0, L1).encode()) - 1
+    with pytest.raises(BudgetError):
+        render([], preamble + "p", cfg)
 
 
 def test_oversized_item_goes_to_overflow_untruncated() -> None:
@@ -169,8 +182,8 @@ def test_overflow_keeps_render_order_and_includes_manual_lines() -> None:
 
 
 def test_manual_preamble_replaces_the_default() -> None:
-    r = render([], "\n\n  # My index\r\n\tindented\x07 line next  \n\n", Config())
-    assert r.l0.startswith("  # My index\n indented line\nnext\n\n" + link_line(L1))
+    r = render([], "\n\n  # My index\r\n\tindented\x07 line\u2028next\x85\x1cend\rok  \n\n", Config())
+    assert r.l0.startswith("  # My index\n indented line next end ok\n\n" + link_line(L1))
     assert head_lines("  \n\t", L1)[:3] == [TITLE, "", NOTE]
 
 
@@ -209,8 +222,8 @@ def test_property_budget_warning_reachability_and_incremental_size() -> None:
         resident = [it for it in items if it.resident and it.origin != "pending"]
         order = render_order(resident)
         assert r.overflow == [it for it in order if it in r.overflow]
-        rest = [it for it in order if nbytes(it.idx) <= cfg.item_max_bytes]
-        spilled = [it for it in r.overflow if nbytes(it.idx) <= cfg.item_max_bytes]
+        rest = [it for it in order if item_bytes(it) <= cfg.item_max_bytes]
+        spilled = [it for it in r.overflow if item_bytes(it) <= cfg.item_max_bytes]
         assert rest[len(rest) - len(spilled):] == spilled
         assert reachable(items, r) == []
         head = head_lines(None, cfg.l1_name)
@@ -244,3 +257,21 @@ def test_l1_sections_named_like_its_own_headings_get_a_suffix() -> None:
         "", "## Unresolved", "- p",
     ]) + "\n"
     assert "## Overflow\n- r\n" in r.l0
+
+
+@pytest.mark.parametrize("section, sub", [("H" * 21000, ""), ("H", "S" * 21000)])
+def test_section_and_subsection_names_count_against_the_item_cap(section: str, sub: str) -> None:
+    """Audit PoC 4: a 21 KB idx_section or idx_sub evicted every resident entry from L0."""
+    legit = [item(f"legit {n}", "S", order=100 + n, file=f"m{n}.md") for n in range(20)]
+    hog = item("short", section, sub, order=-(10**17), file="hog.md")
+    r = render(legit + [hog], None, Config())
+    assert r.oversized == [hog] and r.overflow == [hog] and max(section, sub, key=len) not in r.l0
+    assert all(f"\n- legit {n}\n" in r.l0 for n in range(20)) and r.l1.endswith("\n## Overflow\n- short\n")
+
+
+def test_the_item_cap_is_inclusive() -> None:
+    cfg = Config(item_max_bytes=80)
+    fits = item("x" * 70, "S" * 6, "U" * 4, file="a.md")
+    over = item("y" * 70, "S" * 6, "U" * 5, file="b.md")
+    assert (item_bytes(fits), item_bytes(over)) == (80, 81)
+    assert render([fits, over], None, cfg).oversized == [over]

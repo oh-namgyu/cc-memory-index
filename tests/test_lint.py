@@ -47,8 +47,7 @@ def test_clean_store_has_no_messages_and_lint_writes_nothing(tmp_path: Path) -> 
     (root / ".index.lock").unlink()
     before = snapshot(root)
     code, errors, warnings = _lint(root)
-    assert (code, errors) == (0, [])
-    assert warnings == ["tea.md: frontmatter name 'Tea time' differs from the file name"]
+    assert (code, errors, warnings) == (0, [], [])
     assert snapshot(root) == before and not (root / ".index.lock").exists()
 
 
@@ -141,7 +140,7 @@ def test_warnings_for_names_oversized_idx_bad_names_and_no_frontmatter(tmp_path:
     code, errors, warnings = _lint(_built(root))
     assert (code, errors) == (0, [])
     assert sorted(w.split(":")[0].split(" ")[0] for w in warnings) == ["'_bad.md'", "'a..b.md'", "long.md",
-                                                                        "plain.md", "tea.md"]
+                                                                        "plain.md"]
     assert any("over item_max_bytes (1024)" in w and "Overflow" in w for w in warnings)
     assert "plain.md has no frontmatter: it is indexed by its file name only" in warnings
 
@@ -169,7 +168,7 @@ def test_record_naming_the_current_l1_is_fine(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("frontmatter, why", [
     ("metadata: [a, b]\n", "build cannot add it there ('metadata' is not a block mapping)"),
-    ('metadata:\n  idx: ""\n', "build cannot add it there (it already has an 'idx' key that is empty or not a"),
+    ('metadata:\n  idx: ""\n', "build cannot add it there (its 'idx' key already holds a different, empty or"),
 ])
 def test_pending_line_that_cannot_be_folded_is_an_error(tmp_path: Path, frontmatter: str, why: str) -> None:
     root = _built(clean_store(tmp_path))

@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
 
-from .items import DEFAULT_SECTION, Item, PendingEntry
+from .items import Item, PendingEntry
 from .segments import OVERFLOW, UNRESOLVED, l1_heading, norm, pieces
 from .store import Config
 from .text import sanitize
@@ -72,6 +72,12 @@ def size_of(lines: Sequence[str]) -> int:
     return sum(nbytes(line) + 1 for line in lines)
 
 
+def item_bytes(item: Item) -> int:
+    """What item_max_bytes caps (DESIGN §4.1): the item's line text and its section and subsection
+    names, which it may bring into L0 as headings."""
+    return nbytes(item.idx) + nbytes(item.section) + nbytes(item.sub)
+
+
 def render_order(items: Iterable[Item]) -> list[Item]:
     """Sections by smallest order then name; the unnamed subsection first, then the others
     the same way; items by (order, file). Ties keep the input order."""
@@ -122,8 +128,11 @@ def _clean_line(line: str) -> str:
 
 
 def preamble_lines(preamble: Optional[str]) -> list[str]:
-    """The manual preamble as written to L0, or the default one when it is none or blank."""
-    lines = [_clean_line(line) for line in (preamble or "").splitlines()]
+    """The manual preamble as written to L0, or the default one when it is none or blank.
+
+    It is split on LF only (after CRLF), as the rescue splits L0, and each line is sanitised, so
+    other line separators in a line become spaces or vanish instead of making extra lines."""
+    lines = [_clean_line(line) for line in (preamble or "").replace("\r\n", "\n").split("\n")]
     while lines and not lines[0]:
         lines.pop(0)
     while lines and not lines[-1]:
@@ -137,15 +146,16 @@ def head_lines(preamble: Optional[str], l1_name: str) -> list[str]:
 
 
 def check_fixed_cost(head: list[str], reserve: str, cfg: Config) -> None:
-    """DESIGN §4.1 step 1: head, reserved warning and one maximum-size item must fit."""
-    probe = ["", "## " + DEFAULT_SECTION, BULLET + "x" * cfg.item_max_bytes]
+    """DESIGN §4.1 step 1: head, reserved warning and one maximum-size item must fit. The largest
+    item opens a section and a subsection, with item_bytes at the cap."""
+    probe = ["", "## S", "", "### U", BULLET + "x" * (cfg.item_max_bytes - 2)]
     lines = head + [reserve] + probe
     size = size_of(lines)
     if size > cfg.budget_bytes or len(lines) > cfg.budget_lines:
         raise BudgetError(
             f"the fixed part of MEMORY.md (preamble, link line, reserved warning line and one item of"
-            f" {cfg.item_max_bytes} bytes) needs {size} bytes and {len(lines)} lines, over the budget of"
-            f" {cfg.budget_bytes} bytes and {cfg.budget_lines} lines: shorten the preamble or change"
+            f" {cfg.item_max_bytes} bytes with its headings) needs {size} bytes and {len(lines)} lines, over the"
+            f" budget of {cfg.budget_bytes} bytes and {cfg.budget_lines} lines: shorten the preamble or change"
             " .memory-index.json"
         )
 
@@ -170,7 +180,7 @@ def fill(head: list[str], resident: Sequence[Item], cfg: Config) -> Fill:
     body = result.body
     stopped = False
     for item in render_order(resident):
-        if nbytes(item.idx) > cfg.item_max_bytes:
+        if item_bytes(item) > cfg.item_max_bytes:
             result.oversized.append(item)
         elif not stopped:
             lines = body.plan(item)

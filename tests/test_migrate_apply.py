@@ -166,3 +166,41 @@ def test_manifest_records_every_copy_and_its_intended_hash(tmp_path: Path) -> No
     assert manifest["files"][NOTES]["before"] is None and not (snap / NOTES).exists()
     assert (snap / L0).read_text(encoding="utf-8") == INDEX
     assert os.name != "posix" or snap.stat().st_mode & 0o777 == 0o700
+
+
+SEPARATORS = ["\u2028", "\u2029", "\x85", "\x0b", "\x0c", "\x1c", "\x1e", "\r", "\t"]
+
+
+def _separated(base: Path, sep: str) -> Path:
+    base.mkdir(parents=True, exist_ok=True)
+    root = make_store(base)
+    write_memory(root, "a.md", name="A", description="a")
+    write_index(root, f"# Memory\n\nintro{sep}more\n\n## Ref\n- [A](a.md) — a line\n")
+    return root
+
+
+@pytest.mark.parametrize("sep", SEPARATORS)
+def test_line_separators_in_a_hand_written_preamble(tmp_path: Path, sep: str) -> None:
+    """Audit PoC 11c: all but TAB wedged migrate --apply at exit 3 with its marker kept, forever."""
+    root = _separated(tmp_path, sep)
+    res = run_migrate(str(root), apply=True)
+    assert res.code == 0 and not (root / MIGRATING).exists(), res.messages
+    joined = "intromore" if sep in "\x0b\x0c\x1c\x1e" else "intro more"
+    assert (root / L0).read_text(encoding="utf-8").startswith(f"# Memory\n\n{joined}\n\n")
+    assert run_build(str(root), False).stats["written"] == []
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\x1c"])
+def test_a_migration_stopped_at_its_build_resumes_with_such_a_preamble(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sep: str
+) -> None:
+    """The state the audit left: every migration write done, the index never built, the marker kept."""
+    reference = _separated(tmp_path / "reference", sep)
+    with monkeypatch.context() as m:
+        calls = record_replaces(m)
+        assert run_migrate(str(reference), apply=True).code == 0
+    root = _separated(tmp_path / "stopped", sep)
+    with monkeypatch.context() as m:
+        record_replaces(m, crash_at=calls.index("index-l1.md") + 1)
+        assert run_migrate(str(root), apply=True).code == 6 and (root / MIGRATING).exists()
+    assert run_migrate(str(root), apply=True).code == 0 and tree(root) == tree(reference)

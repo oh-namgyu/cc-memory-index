@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 from typing import AbstractSet, Any, Iterator, Optional, Sequence
 
 from .fold import Folded, fold
-from .generated import as_text, backup_generated, edited_generated_files, record_bytes
+from .generated import as_text, backup_generated, edited_generated_files, known_lines, record_bytes
 from .items import MANUAL_NAME, PENDING_NAME, DataFileError
-from .plan import Plan, Refusal, prepare, rerender
+from .plan import USAGE_ERROR, Plan, Refusal, prepare, rerender
 from .render import BudgetError, RenderInvariant
 from .rescue import Context, Edited, Rescue, analyse, body_pieces, default_pieces, lost
 from .safeio import ConcurrentEdit, LockTimeout, RootChanged, StoreDir, TooLarge, UnsafeEntry
@@ -19,7 +19,7 @@ from .store import RENDER_MARK, Config, ConfigError, load_config
 EXIT_OK = 0
 EXIT_OVERFLOW = 1
 EXIT_OUT_OF_SYNC = 1
-EXIT_USAGE = 2
+EXIT_USAGE = USAGE_ERROR
 EXIT_EDITED = 3
 EXIT_CONCURRENT = 4
 EXIT_LOCK = 5
@@ -84,7 +84,7 @@ def _edited(plan: Plan, res: BuildResult) -> list[Edited]:
         res.messages.append(f"{RENDER_MARK} is malformed: the generated files are treated as possibly edited")
     current = {"l0": plan.l0, "l1": plan.l1}
     fresh = {"l0": plan.rendered.l0, "l1": plan.rendered.l1}
-    roles = edited_generated_files(plan.parsed, current, fresh)
+    roles = edited_generated_files(plan.parsed, current, fresh, known_lines(plan.inputs.data.manual.preamble))
     return [Edited(current[role].name, role, as_text(current[role].data)) for role in roles]
 
 
@@ -112,7 +112,7 @@ def _context(plan: Plan, cfg: Config, moved: AbstractSet[str]) -> Context:
 def _rescue(plan: Plan, cfg: Config, edited: Sequence[Edited], moved: AbstractSet[str], res: BuildResult) -> Rescue:
     """Classify the lines added by hand; refuse (exit 3, nothing written) when any cannot be kept."""
     found = analyse(edited, _context(plan, cfg, moved))
-    res.stats["unrescuable"] = [{"segment": u.segment, "reason": u.reason} for u in found.unrescuable]
+    res.stats["unrescuable"] = [{"segment": u.segment, "reason": u.reason, "kind": u.kind} for u in found.unrescuable]
     if found.unrescuable:
         for u in found.unrescuable:
             where = f"{u.file}: {u.segment[:100]!r}" if u.segment else u.file
@@ -227,8 +227,9 @@ def run_build(store_path: str, force: bool) -> BuildResult:
     """Render the store and write the generated files under the store lock."""
     res = new_result()
     with outcome(res), StoreDir(store_path) as sd:
-        with writing(sd, load_config(sd).lock_timeout_s, res.stats):
-            build_locked(sd, load_config(sd), res, force)
+        cfg = load_config(sd)
+        with writing(sd, cfg.lock_timeout_s, res.stats):
+            build_locked(sd, cfg, res, force)
     return res
 
 

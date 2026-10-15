@@ -36,10 +36,12 @@ def _source(sd: StoreDir, cfg: Config, name: str) -> Source:
 
 
 def set_indexed(sd: StoreDir, cfg: Config, name: str) -> bool:
-    """Replace or add `tier: indexed`; the caller holds the lock. True when the file changed."""
+    """Replace or add `tier: indexed`; the caller holds the lock. True when the file changed.
+
+    The result must parse again with that tier, or nothing is written (exit 7)."""
     src = _source(sd, cfg, name)
     try:
-        text = frontmatter.patch(src.text, add={}, replace={"tier": INDEXED})
+        text = frontmatter.patch_checked(src.text, add={}, replace={"tier": INDEXED}, check=("tier",))
     except frontmatter.PatchError as e:
         raise Refusal(EXIT_PARSE, f"{name}: the tier cannot be set safely ({e}); set it by hand") from e
     if text == src.text:

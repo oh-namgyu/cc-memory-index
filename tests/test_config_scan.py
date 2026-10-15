@@ -57,7 +57,6 @@ def test_config_accepts_bom(tmp_path: Path) -> None:
         {"budget_lines": 201},
         {"item_max_bytes": 79},
         {"item_max_bytes": 4097},
-        {"line_max_bytes": 230},
         {"lock_timeout_s": 0.5},
         {"lock_timeout_s": 61},
         {"lock_timeout_s": "5"},

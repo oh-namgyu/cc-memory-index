@@ -36,10 +36,13 @@ set `CC_MEMORY_INDEX_DIR`.
 | `.index-render.json` | SHA-256 of L0 and L1 as last written by this tool |
 | `.index.lock` | Lock target (§7.4) |
 | `.index-migrating`, `.index-backup-<ts>/` | Migration only (§8) |
+| `.MEMORY.md.bak-<ts>`, `.<l1 name>.bak-<ts>` | Backups written by `build --force` (§6) |
 | `.<name>.tmp-<16 hex>` | Temporary file of a write in progress; one left by a killed process is removed by the next writing command once it is 10 minutes old (§7.1) |
 | `index-notes.md` | Created by `migrate` for text that was not an index line (§8); an ordinary memory file afterwards |
 
-Source names must match `^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$` and must not contain `..`.
+Source names must match `^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$`, must not contain `..`, and the part
+before the first `.` must not be a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+`LPT1`–`LPT9`, any case).
 Other names are skipped and reported by `lint`. At most 5,000 sources are read; a source over
 1 MiB, or one that is not valid UTF-8, is skipped and reported (patching must round-trip the
 text exactly).
@@ -70,8 +73,10 @@ metadata:
 
 ### 3.1 Parser (strict subset, no YAML library)
 
-* The file must start with `---` (an optional UTF-8 BOM is allowed) and the block ends at the
-  next line that is exactly `---`. Only the first 64 KiB are read; no closing line within that
+* The file must start with `---` (one optional UTF-8 BOM is allowed) and the block ends at the
+  next line that is exactly `---`. A line that is `---` followed by spaces or tabs, as the first
+  line or before the closing line, makes the frontmatter unparseable, because readers disagree on
+  whether it is a fence. Only the first 64 KiB are read; no closing line within that
   window means *unparseable*.
 * Recognised lines: `key: value` at the top level, `metadata:` followed by indented
   `key: value` lines, blank lines and `#` comments. Values are bare scalars, double-quoted
@@ -84,10 +89,17 @@ metadata:
 * Inserts missing keys into the `metadata:` block, creating the block at the end of the
   frontmatter if absent. **Never changes an existing key**, with one exception: `demote`
   replaces the `tier` line.
-* Values are written as double-quoted strings with `"` and `\` escaped. A value is first
+* Values are written as double-quoted strings with `"` and `\` escaped; integers (`idx_order`)
+  are written bare. A value is first
   sanitised (§5.1), so a patch can never add a line, close the frontmatter, or add a key
   other than the one requested.
 * The file's line ending (LF or CRLF) is kept.
+* The patcher refuses (the line stays pending; `demote` exits 7) a frontmatter with a column-0
+  line that is not `key: value` or a comment (a `- ` item is accepted only as the value of the
+  null-valued key just before it), a quoted value that does not end on its line, a NEL, U+2028 or
+  U+2029, or a `metadata` that is not a block mapping.
+* Every patch is parsed again before it is written; it must parse and every key it adds or
+  replaces must read back as written.
 
 ## 4. Rendering
 
@@ -98,7 +110,7 @@ Every source becomes an *item* `{file, idx, section, sub, order, tier}`. Items f
   same way, items by `(order, file)`. Within a section, items without a subsection come first,
   so they never appear under another subsection's heading.
 * Every item has its own `- ` line in L0 and L1: Claude Code's guidance for `MEMORY.md` is one
-  line per entry, and a real session flagged packed lines as wrong. A `## ` or `### ` heading is
+  line per entry. A `## ` or `### ` heading is
   followed directly by its lines; exactly one blank line precedes each heading.
 * L0 always starts with the preamble, then a link line to L1, then the budget warning line
   when anything overflowed (§4.1).
@@ -112,13 +124,16 @@ Every source becomes an *item* `{file, idx, section, sub, order, tier}`. Items f
 
 The L0 budget defaults to 20,480 bytes and 160 lines, about 80% of Claude Code's 25 KB /
 200-line limit, so its own "near the limit" reminders stay away (configurable, never above
-25,000 bytes or 200 lines). With one entry per line the line budget usually binds first: about
-150 resident entries fit. It is measured on the exact text written, including the preamble, the L1 link line
+25,000 bytes or 200 lines). With one entry per line, about 135–150 resident entries of typical
+length fit (measured with the defaults: entries of up to 125 bytes stop at the line budget near
+150; at the 142-byte median of real entries the byte budget stops at 137; non-ASCII text, at 3
+bytes per character, fits fewer). It is measured on the exact text written, including the preamble, the L1 link line
 and a **reserved** warning line, so adding the warning can never push L0 over budget.
 
 1. If the fixed cost (preamble + link line + reserved warning + one maximum-size item) exceeds
    the budget, the configuration is rejected before anything is written (exit 2).
-2. Resident items whose `idx` exceeds the per-item cap go to L1 `Overflow`. Nothing is ever
+2. Resident items whose `idx`, `idx_section` and `idx_sub` together exceed the per-item cap go
+   to L1 `Overflow`. Nothing is ever
    truncated. The default cap is 1,024 bytes: across 451 real index lines p50 was 142 B, p99
    489 B and the maximum 692 B (non-ASCII text is 3 bytes per character), and 8% exceeded an
    earlier 300-byte cap. The cap exists so that one huge entry cannot push every later entry
@@ -143,8 +158,10 @@ allowed to change the structure of the files it lands in.
 ### 5.1 Sanitising
 
 Index text (`idx`, sections, rescued lines) is reduced to one line: CR, LF, TAB, NEL (U+0085)
-and the Unicode line and paragraph separators (U+2028, U+2029) become spaces, other C0
-controls, DEL and NUL are removed, and the result is stripped.
+and the Unicode line and paragraph separators (U+2028, U+2029) become spaces; all other C0 and
+C1 controls, DEL, U+FEFF and the bidirectional controls U+202A–U+202E and U+2066–U+2069 are
+removed, and the result is stripped. Multi-line text such as a preamble is split on LF only
+(after CRLF) and each line is sanitised the same way.
 
 ### 5.2 Paths
 
@@ -156,6 +173,10 @@ controls, DEL and NUL are removed, and the result is stripped.
   than one hard link are never written.
 * Link targets taken from index text must be valid source names (§2). Anything that would
   resolve outside the root is ignored and reported.
+* A link is `[text](target)` on one line: no brackets in the text; no whitespace, brackets,
+  parentheses or angle brackets in the target, which may be wrapped in `<` `>`. A `#fragment` is
+  dropped and a target with a URL scheme is never a memory file. Rescue, `migrate` and `lint` use
+  this one rule, matching in linear time on at most 64 KiB per line.
 
 ### 5.3 Limits
 
@@ -167,7 +188,11 @@ transcripts, 50 MiB per transcript, 200 MiB in total.
 Claude Code's built-in memory instructions tell Claude to add a line to `MEMORY.md` after
 writing a memory. A generator that overwrote those lines would lose them silently, so every
 write first compares the current L0 and L1 with the hashes in `.index-render.json`. A file that
-already equals the fresh render is not an edit (that is how an interrupted build converges). On a
+already equals the fresh render is not an edit (that is how an interrupted build converges), and
+neither is one holding only blank lines and this tool's own title lines (the preamble and the L1
+title); any other line, including a `# ` heading, is content. An earlier L1 file counts as stale
+only while it holds the hash the record names and starts with the generated L1 header; otherwise
+it is an ordinary memory file. On a
 mismatch, each line of the current file is first compared whole (whitespace-normalised) with the
 lines of the new render and every default line; a line that matches is generated, whatever ` · `
 it contains. Every other line is split, after whitespace normalisation, into *segments*
@@ -234,8 +259,7 @@ rollback, so recovery can never write old content over a newer edit.
 
 Claude Code's Write and Edit tools do not know about this tool's lock. Every file that is read
 is fingerprinted (size and SHA-256). Immediately before each replace, the target is checked
-again; if it changed, that file is left alone and the command exits 4 ("edited concurrently —
-run again"). A rescued line that could not be folded stays in `.index-pending.json`, so it is
+again; if it changed, that file is left alone and the command exits 4 ("edited concurrently, run again"). A rescued line that could not be folded stays in `.index-pending.json`, so it is
 still rendered.
 
 The remaining window is between that last check and the rename itself, measured at about 80 µs
@@ -298,11 +322,15 @@ store, against concurrent editors that are not malicious, and against crashes.
   rescued), and removes the marker last. Any failure keeps the marker.
 * `migrate --restore <ts>` puts back a source only if its current hash equals the recorded
   after-hash, and removes the notes file only if it still holds its after-hash; a file edited
-  since is left alone and reported (exit 4).
-* A store that already uses this format (a render record, a manual-lines file, or a source
-  with a `tier`) is left unchanged; if it was converted but never built, `--apply` builds it.
+  since is left alone and reported (exit 4). It takes no file names from the render record.
+  Besides the notes file and `.index-manual.json`, it removes only a `MEMORY.md` or configured L1
+  file that did not exist before the migration and still holds the hash build last wrote; for the
+  L1 file, only while it starts with the generated header.
+* A store that already uses this format (a render record or a manual-lines file, which
+  `--apply` always writes) is left unchanged; if it was converted but never built, `--apply`
+  builds it.
 * Conversely, `build` refuses (exit 2, "run migrate first") a store that has a non-empty
-  `MEMORY.md` but no `.index-render.json` and no source with a `tier`: treating every line of
+  `MEMORY.md` but no `.index-render.json` and no `.index-manual.json` (a `tier` set by hand does not count): treating every line of
   a hand-written index as a hand edit would move all of it to L1.
 
 ## 9. Configuration
@@ -314,14 +342,21 @@ store, against concurrent editors that are not malicious, and against crashes.
 | `budget_bytes` | 20480 | 2048–25000 |
 | `budget_lines` | 160 | 20–200 |
 | `item_max_bytes` | 1024 | 80–4096 |
-| `l1_name` | `index-l1.md` | a valid source name |
+| `l1_name` | `index-l1.md` | a valid source name other than `MEMORY.md`; if a file of that name exists, it must be one this tool generated (or the record's L1), otherwise every command refuses (exit 2), even `build --force`, so a config file cannot have a memory overwritten |
 | `lock_timeout_s` | 5 | 1–60 |
 
 ## 10. Commands and exit codes
 
 `python -m cc_memory_index <command> [--dir PATH] [--json]`. Store discovery: `--dir`, then
-`$CC_MEMORY_INDEX_DIR`, then the store of the current working directory. stdout carries a
-human summary (`--json`: one JSON object); stderr carries errors and warnings only.
+`$CC_MEMORY_INDEX_DIR`, then the store of the current working directory.
+
+Without `--json`, a command prints its whole report (its messages, a summary, then
+`<command>: exit N` when N is not 0) on stdout when it exits 0 or 1, and on stderr when it exits 2
+or more; a report is never split between the two. With `--json` it prints exactly one JSON object
+`{command, code, messages, stats}` on stdout and nothing on stderr, whatever the exit code. A
+command line that cannot be parsed is reported by argparse on stderr with exit 2, also with
+`--json`. Characters the output encoding cannot represent are backslash-escaped, and a reader
+that closes the pipe early does not change the exit code.
 
 | Command | Writes | Exit codes |
 |---|---|---|
@@ -330,8 +365,12 @@ human summary (`--json`: one JSON object); stderr carries errors and warnings on
 | `lint` | no | 0 · 1 errors found |
 | `suggest [--transcripts N] [--apply]` | only with `--apply`, which always ends with a build | 0 · 1 |
 | `demote FILE` | yes | the following build's code · 2 unknown, invalid or generated name · 7 frontmatter that cannot be patched |
-| `migrate [--apply \| --restore TS]` | with `--apply` / `--restore` | 0 · 1 invariant failed (marker kept) · the first build's 3/4/6/8 (marker kept) · 7 unparseable source |
-| `hook` | yes, only for an edit inside a store | always 0 |
+| `migrate [--apply \| --restore SNAPSHOT]` | with `--apply` / `--restore` | 0 · 1 invariant failed (marker kept) · the first build's 3/4/6/8 (marker kept) · 7 unparseable source |
+| `hook` | yes, only for an edit inside a store | always 0; `--dir` or `--json` with `hook` is a usage error (2) |
+
+SNAPSHOT is the id that `--apply` printed (`20261015T042635Z`) or its directory name
+(`.index-backup-20261015T042635Z`). For `suggest --transcripts N`, N is 1–50; any other value is a
+usage error (2).
 
 Common: 2 usage or configuration error · 4 edited concurrently, rerun · 5 lock timeout ·
 6 I/O error (state stays valid, rerun) · 7 a source could not be parsed (skipped, reported) ·
@@ -347,15 +386,24 @@ Installing the plugin therefore changes nothing until the user runs `migrate --a
 `build` in a store, and it works wherever `autoMemoryDirectory` puts the store. Every other
 call exits 0 immediately.
 
-It runs `build` and, when there is something Claude should know (a rescued line, an overflow,
-an unrescuable edit, a concurrent edit), prints one JSON object:
+It runs `build` and, when there is something Claude should know (a rescued or manual line, an
+overflow, a refused hand edit, a concurrent edit, an unparseable memory file, or a failed build),
+prints one JSON object:
 
 ```json
 {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "..."}}
 ```
 
-It always exits 0, including on internal errors (one line on stderr), so a bug in this tool can
-never block a session. `CC_MEMORY_INDEX_DISABLE=1` turns it off without uninstalling. Measured on Claude Code 2.1.299: `additionalContext` reaches Claude
+`additionalContext` is built only from fixed sentences, counts and at most five rescued memory
+file names, each a valid source name (§2). No other text read from the store (messages, refused
+lines, reasons, data-file contents) is passed to Claude, because memory content is untrusted
+(§5). For a failed build (exit 2, 6, 8) or an unparseable memory file (7) it says so and points to
+`cc-memory-index lint`. For a refused hand edit (3) it states the rule an added line must meet and
+how many lines were refused. A lock timeout (5) is silent.
+
+It always exits 0, including on internal errors (one line on stderr), a payload too deeply nested
+to parse, a closed stdout, and a package that `hooks/run_hook.py` cannot import, so a bug in this
+tool can never block a session. `CC_MEMORY_INDEX_DISABLE=1` turns it off without uninstalling. Measured on Claude Code 2.1.299: `additionalContext` reaches Claude
 verbatim, while exit code 2 is presented to Claude as a "blocking error", which is why it is
 not used.
 
