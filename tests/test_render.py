@@ -259,7 +259,7 @@ def test_l1_sections_named_like_its_own_headings_get_a_suffix() -> None:
     assert "## Overflow\n- r\n" in r.l0
 
 
-@pytest.mark.parametrize("section, sub", [("H" * 21000, ""), ("H", "S" * 21000)])
+@pytest.mark.parametrize("section, sub", [("H" * 21000, ""), ("H", "S" * 21000)], ids=["long-section", "long-subsection"])
 def test_section_and_subsection_names_count_against_the_item_cap(section: str, sub: str) -> None:
     """Audit PoC 4: a 21 KB idx_section or idx_sub evicted every resident entry from L0."""
     legit = [item(f"legit {n}", "S", order=100 + n, file=f"m{n}.md") for n in range(20)]
