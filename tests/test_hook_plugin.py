@@ -70,7 +70,8 @@ def test_run_hook_exits_0_when_the_package_cannot_be_imported(tmp_path: Path) ->
     script.write_bytes(Path(RUN_HOOK).read_bytes())
     done = _run_hook(tmp_path, b"{}", subprocess.PIPE, str(script))
     assert done.returncode == 0 and done.stdout == b""
-    assert done.stderr.decode("utf-8") == "cc-memory-index hook: cannot load the package: ImportError: broken checkout\n"
+    # A child process writes CRLF on Windows.
+    assert done.stderr.decode("utf-8").replace("\r\n", "\n") == "cc-memory-index hook: cannot load the package: ImportError: broken checkout\n"
 
 
 def test_hooks_json_runs_run_hook_for_the_tools_the_hook_accepts() -> None:
