@@ -26,9 +26,10 @@ def test_one_rule_for_links(text: str, links: list[str]) -> None:
     assert memory_links(text) == links
 
 
+# Short ids: pytest puts the test id in an environment variable, which Windows caps at 32,767 characters.
 @pytest.mark.parametrize("line", [
     "[" * 400_000, "[a](" * 100_000, "[a]([" * 80_000, "](" * 200_000, "[" + "x" * 400_000, "[x]" * 130_000,
-])
+], ids=["brackets", "open-targets", "nested-open", "close-open", "open-text", "bare-labels"])
 def test_link_extraction_is_linear(line: str) -> None:
     start = time.perf_counter()
     memory_links("- " + line + "\n" + line)
