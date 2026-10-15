@@ -37,7 +37,7 @@ def test_dir_fd_mode_is_the_default_on_posix(tmp_path: Path) -> None:
 
 
 def test_root_must_be_a_directory(tmp_path: Path) -> None:
-    (tmp_path / "f").write_text("x")
+    (tmp_path / "f").write_text("x", encoding="utf-8")
     with pytest.raises(NotADirectoryError):
         StoreDir(str(tmp_path / "f"))
 

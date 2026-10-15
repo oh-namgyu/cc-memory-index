@@ -18,11 +18,11 @@ L0, L1 = "MEMORY.md", "index-l1.md"
 
 
 def _pending(root: Path) -> list[dict[str, object]]:
-    return json.loads((root / PENDING_NAME).read_text())["entries"]
+    return json.loads((root / PENDING_NAME).read_text(encoding="utf-8"))["entries"]
 
 
 def _manual(root: Path) -> list[dict[str, object]]:
-    return json.loads((root / MANUAL_NAME).read_text())["lines"]
+    return json.loads((root / MANUAL_NAME).read_text(encoding="utf-8"))["lines"]
 
 
 def _settled(root: Path) -> None:
@@ -38,24 +38,24 @@ def test_line_for_a_new_memory_is_folded_into_its_frontmatter(tmp_path: Path) ->
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["rescued"] == [{"file": "new_note.md", "idx": line[2:]}]
     assert res.stats["manual_added"] == [] and res.stats["unrescuable"] == []
-    fm = parse((root / "new_note.md").read_text())
+    fm = parse((root / "new_note.md").read_text(encoding="utf-8"))
     assert (fm.get("idx"), fm.get("idx_section"), fm.get("idx_sub"), fm.get("idx_order")) == (
         line[2:], "", "", "1000001")
     assert _pending(root) == [] and not (root / MANUAL_NAME).exists()
-    l1 = (root / L1).read_text()
-    assert line not in (root / L0).read_text() and line + "\n" in l1
+    l1 = (root / L1).read_text(encoding="utf-8")
+    assert line not in (root / L0).read_text(encoding="utf-8") and line + "\n" in l1
     assert l1.index("## Project") < l1.index(line)  # placed by its type, not where Claude appended it
     _settled(root)
 
 
 def test_edited_default_line_becomes_the_files_idx(tmp_path: Path) -> None:
     root = built_store(tmp_path)
-    l1 = (root / L1).read_text()
-    (root / L1).write_text(l1.replace("an old project note", "an old project note, now archived"))
+    l1 = (root / L1).read_text(encoding="utf-8")
+    (root / L1).write_text(l1.replace("an old project note", "an old project note, now archived"), encoding="utf-8")
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["rescued"][0]["file"] == "old.md"
-    assert parse((root / "old.md").read_text()).get("idx") == "[Old](old.md) — an old project note, now archived"
-    assert "- [Old](old.md) — an old project note\n" not in (root / L1).read_text()
+    assert parse((root / "old.md").read_text(encoding="utf-8")).get("idx") == "[Old](old.md) — an old project note, now archived"
+    assert "- [Old](old.md) — an old project note\n" not in (root / L1).read_text(encoding="utf-8")
     _settled(root)
 
 
@@ -71,7 +71,7 @@ def test_line_without_a_memory_link_becomes_a_manual_line(tmp_path: Path, line: 
     seg = line[2:] if line.startswith("- ") else line
     assert res.code == 0 and res.stats["manual_added"] == [seg] and res.stats["rescued"] == []
     assert _manual(root) == [{"seg": seg, "section": "User", "sub": "", "order": 1000001}]
-    assert f"## User\n- [Tea](tea.md) — likes tea\n- {seg}\n" in (root / L0).read_text()
+    assert f"## User\n- [Tea](tea.md) — likes tea\n- {seg}\n" in (root / L0).read_text(encoding="utf-8")
     assert not (root / PENDING_NAME).exists()
     _settled(root)
 
@@ -82,7 +82,7 @@ def test_manual_lines_keep_their_section_and_subsection(tmp_path: Path) -> None:
     assert run_build(str(root), False).code == 0
     assert [(m["seg"], m["section"], m["sub"], m["order"]) for m in _manual(root)] == [
         ("Back up first", "Rules", "Data", 1000001), ("Ask twice", "Rules", "Data", 1000002)]
-    assert (root / L0).read_text().endswith("## Rules\n\n### Data\n- Back up first\n- Ask twice\n")
+    assert (root / L0).read_text(encoding="utf-8").endswith("## Rules\n\n### Data\n- Back up first\n- Ask twice\n")
     _settled(root)
 
 
@@ -103,7 +103,7 @@ def _with_rule(tmp_path: Path) -> Path:
 ])
 def test_unrescuable_line_writes_nothing(tmp_path: Path, edit: Callable[[str], str], reason: str) -> None:
     root = _with_rule(tmp_path)
-    (root / L0).write_text(edit((root / L0).read_text()))
+    (root / L0).write_text(edit((root / L0).read_text(encoding="utf-8")), encoding="utf-8")
     before = snapshot(root)
     res = run_build(str(root), False)
     assert res.code == 3 and snapshot(root) == before
@@ -121,7 +121,7 @@ def test_unrescuable_line_writes_nothing(tmp_path: Path, edit: Callable[[str], s
 def test_edited_head_writes_nothing(tmp_path: Path, name: str, edit: Callable[[str], str], reason: str) -> None:
     root = _with_rule(tmp_path)
     append(root, L0, "- an addition that would be fine on its own\n")
-    (root / name).write_bytes(edit((root / name).read_text()).encode("utf-8", "surrogateescape"))
+    (root / name).write_bytes(edit((root / name).read_text(encoding="utf-8")).encode("utf-8", "surrogateescape"))
     before = snapshot(root)
     res = run_build(str(root), False)
     assert res.code == 3 and snapshot(root) == before
@@ -130,25 +130,25 @@ def test_edited_head_writes_nothing(tmp_path: Path, name: str, edit: Callable[[s
 
 def test_deleted_and_reordered_generated_lines_are_restored(tmp_path: Path) -> None:
     root = _with_rule(tmp_path)
-    fresh = (root / L0).read_text()
+    fresh = (root / L0).read_text(encoding="utf-8")
     head, body = fresh.split("\n## ", 1)
     sections = body.split("\n## ")
     assert len(sections) == 2
-    (root / L0).write_text(head + "\n## " + sections[1].rstrip("\n") + "\n\n## " + sections[0].split("\n")[0] + "\n")
+    (root / L0).write_text(head + "\n## " + sections[1].rstrip("\n") + "\n\n## " + sections[0].split("\n")[0] + "\n", encoding="utf-8")
     res = run_build(str(root), False)
-    assert res.code == 0 and res.stats["written"] == [L0] and (root / L0).read_text() == fresh
+    assert res.code == 0 and res.stats["written"] == [L0] and (root / L0).read_text(encoding="utf-8") == fresh
     assert not (root / PENDING_NAME).exists() and not (root / MANUAL_NAME).exists()
 
 
 def test_line_added_to_l1_is_rescued_too(tmp_path: Path) -> None:
     root = built_store(tmp_path)
     write_memory(root, "new_note.md", name="New note", type="project")
-    text = (root / L1).read_text()
-    (root / L1).write_text(text.replace("## Project\n", "## Project\n- [New note](new_note.md) — from L1\n"))
+    text = (root / L1).read_text(encoding="utf-8")
+    (root / L1).write_text(text.replace("## Project\n", "## Project\n- [New note](new_note.md) — from L1\n"), encoding="utf-8")
     res = run_build(str(root), False)
     assert res.code == 0
     assert res.stats["rescued"] == [{"file": "new_note.md", "idx": "[New note](new_note.md) — from L1"}]
-    assert parse((root / "new_note.md").read_text()).get("idx_section") == ""
+    assert parse((root / "new_note.md").read_text(encoding="utf-8")).get("idx_section") == ""
     _settled(root)
 
 
@@ -157,13 +157,13 @@ def test_generated_lines_joined_or_moved_by_hand_are_not_an_edit_to_rescue(tmp_p
     for n in range(3):
         write_memory(root, f"m{n}.md", tier="resident", idx=f"[m{n}](m{n}.md) — short", idx_section="S")
     assert run_build(str(root), False).code == 0
-    fresh = (root / L0).read_text()
+    fresh = (root / L0).read_text(encoding="utf-8")
     lines = "".join(f"- [m{n}](m{n}.md) — short\n" for n in range(3))
     assert "\n## S\n" + lines in fresh
     joined = "- [m2](m2.md) — short\n\n- [m0](m0.md) —   short · [m1](m1.md) — short\n"
-    (root / L0).write_text(fresh.replace(lines, joined))
+    (root / L0).write_text(fresh.replace(lines, joined), encoding="utf-8")
     res = run_build(str(root), False)
-    assert res.code == 0 and res.stats["written"] == [L0] and (root / L0).read_text() == fresh
+    assert res.code == 0 and res.stats["written"] == [L0] and (root / L0).read_text(encoding="utf-8") == fresh
     assert (res.stats["rescued"], res.stats["manual_added"]) == ([], [])
 
 
@@ -176,13 +176,13 @@ def test_generated_line_whose_idx_holds_separators_is_never_rescued(tmp_path: Pa
     write_memory(root, "hub.md", tier="resident", idx=idx, idx_section="S")
     write_memory(root, "spoke.md", name="Spoke", description="details", type="project")
     assert run_build(str(root), False).code == 0
-    fresh = (root / L0).read_text()
+    fresh = (root / L0).read_text(encoding="utf-8")
     assert f"\n## S\n- {idx}\n" in fresh
     copied = "- " + idx.replace(" · ", "\u00a0·\u3000")
-    (root / L0).write_text(fresh + copied + "\n- " + idx + "\n")
+    (root / L0).write_text(fresh + copied + "\n- " + idx + "\n", encoding="utf-8")
     res = run_build(str(root), False)
     assert res.code == 0 and (res.stats["rescued"], res.stats["manual_added"], res.stats["unrescuable"]) == ([], [], [])
-    assert (root / L0).read_text() == fresh and "idx" not in parse((root / "spoke.md").read_text()).metadata
+    assert (root / L0).read_text(encoding="utf-8") == fresh and "idx" not in parse((root / "spoke.md").read_text(encoding="utf-8")).metadata
     append(root, L0, f"- {idx} · and a note added by hand\n")
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["manual_added"] == ["and a note added by hand"] and res.stats["rescued"] == []
@@ -212,11 +212,11 @@ def test_the_same_line_added_twice_is_kept_once(tmp_path: Path) -> None:
 
 def test_deleted_head_lines_are_generated_and_come_back(tmp_path: Path) -> None:
     root = built_store(tmp_path)
-    fresh = (root / L0).read_text()
+    fresh = (root / L0).read_text(encoding="utf-8")
     trimmed = fresh.replace(TITLE + "\n", "").replace(link_line(L1) + "\n", "")
-    (root / L0).write_text(trimmed + "- Ask first\n")
+    (root / L0).write_text(trimmed + "- Ask first\n", encoding="utf-8")
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["manual_added"] == ["Ask first"]
-    l0 = (root / L0).read_text()
+    l0 = (root / L0).read_text(encoding="utf-8")
     assert l0.startswith(TITLE + "\n") and link_line(L1) in l0 and "\n- Ask first\n" in l0
     _settled(root)

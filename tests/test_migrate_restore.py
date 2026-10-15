@@ -41,9 +41,9 @@ def test_restore_round_trip(tmp_path: Path) -> None:
 
 def test_restore_leaves_files_edited_since(tmp_path: Path) -> None:
     root, original, ident = _migrated(tmp_path, built=True)
-    with (root / "a.md").open("a") as f:
+    with (root / "a.md").open("a", encoding="utf-8") as f:
         f.write("edited after the migration\n")
-    with (root / L0).open("a") as f:
+    with (root / L0).open("a", encoding="utf-8") as f:
         f.write("- a line Claude added\n")
     edited = {name: (root / name).read_bytes() for name in ("a.md", L0)}
     res = run_migrate(str(root), restore=ident)
@@ -99,7 +99,7 @@ def test_restore_of_a_missing_snapshot(tmp_path: Path) -> None:
 def test_restore_refuses_a_malformed_manifest(tmp_path: Path, change: object) -> None:
     root, _, ident = _migrated(tmp_path)
     path = root / (SNAPSHOT_PREFIX + ident) / "manifest.json"
-    path.write_text(change(json.loads(path.read_text())))  # type: ignore[operator]
+    path.write_text(change(json.loads(path.read_text(encoding="utf-8"))), encoding="utf-8")  # type: ignore[operator]
     before = snapshot(root)
     res = run_migrate(str(root), restore=ident)
     assert res.code == 2 and "manifest" in res.messages[-1] and snapshot(root) == before
@@ -108,7 +108,7 @@ def test_restore_refuses_a_malformed_manifest(tmp_path: Path, change: object) ->
 def test_restore_refuses_a_tampered_copy(tmp_path: Path) -> None:
     root, original, ident = _migrated(tmp_path)
     patched = (root / "a.md").read_bytes()
-    (root / (SNAPSHOT_PREFIX + ident) / "a.md").write_text("tampered")
+    (root / (SNAPSHOT_PREFIX + ident) / "a.md").write_text("tampered", encoding="utf-8")
     res = run_migrate(str(root), restore=ident)
     assert res.code == 4 and res.stats["conflicts"] == ["a.md"] and "does not match" in res.messages[0]
     assert (root / "a.md").read_bytes() == patched and (root / "b.md").read_bytes() == original["b.md"]
@@ -116,8 +116,8 @@ def test_restore_refuses_a_tampered_copy(tmp_path: Path) -> None:
 
 def test_restore_keeps_a_marker_of_another_migration(tmp_path: Path) -> None:
     root, original, ident = _migrated(tmp_path)
-    (root / MIGRATING).write_text("20000101T000000Z\n")
+    (root / MIGRATING).write_text("20000101T000000Z\n", encoding="utf-8")
     res = run_migrate(str(root), restore=ident)
     assert res.code == 0 and "another migration" in res.messages[0]
-    assert (root / MIGRATING).read_text() == "20000101T000000Z\n"
+    assert (root / MIGRATING).read_text(encoding="utf-8") == "20000101T000000Z\n"
     assert {n: d for n, d in _top(root).items() if n != MIGRATING} == original

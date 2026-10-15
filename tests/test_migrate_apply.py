@@ -48,7 +48,7 @@ def record_replaces(monkeypatch: pytest.MonkeyPatch, crash_at: int = 0) -> list[
 
 
 def _tier(root: Path, name: str) -> Any:
-    return parse((root / name).read_text()).metadata.get("tier")
+    return parse((root / name).read_text(encoding="utf-8")).metadata.get("tier")
 
 
 def test_crash_at_every_replace_then_rerun_converges(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -77,7 +77,7 @@ def test_resume_plans_from_the_snapshot_copy(tmp_path: Path, monkeypatch: pytest
     res = run_migrate(str(root), apply=True)
     assert res.code == 0 and res.messages[0].startswith("resuming the interrupted migration"), res.messages
     assert _tier(root, "a.md") == _tier(root, "b.md") == "resident" and _tier(root, "c.md") is None
-    assert "written after the crash" in (root / "c.md").read_text() + (root / "index-l1.md").read_text()
+    assert "written after the crash" in (root / "c.md").read_text(encoding="utf-8") + (root / "index-l1.md").read_text(encoding="utf-8")
 
 
 def test_concurrent_edit_stops_and_a_rerun_snapshots_the_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,19 +87,19 @@ def test_concurrent_edit_stops_and_a_rerun_snapshots_the_edit(tmp_path: Path, mo
 
     def racing(self: StoreDir, name: str, data: bytes, expect: Any) -> Any:
         if name == "b.md" and self.path == os.path.realpath(root):
-            (root / "b.md").write_text(edited)
+            (root / "b.md").write_text(edited, encoding="utf-8")
             monkeypatch.setattr(StoreDir, "replace", real)
         return real(self, name, data, expect)
 
     monkeypatch.setattr(StoreDir, "replace", racing)
     res = run_migrate(str(root), apply=True)
     assert res.code == 4 and "migrate --apply" in res.messages[-1], res.messages
-    assert (root / MIGRATING).is_file() and (root / "b.md").read_text() == edited
+    assert (root / MIGRATING).is_file() and (root / "b.md").read_text(encoding="utf-8") == edited
     res = run_migrate(str(root), apply=True)
-    assert res.code == 0 and _tier(root, "b.md") == "resident" and "edited meanwhile" in (root / "b.md").read_text()
+    assert res.code == 0 and _tier(root, "b.md") == "resident" and "edited meanwhile" in (root / "b.md").read_text(encoding="utf-8")
     ident = res.stats["snapshot"][len(SNAPSHOT_PREFIX):]
     assert run_migrate(str(root), restore=ident).code == 0
-    assert (root / "b.md").read_text() == edited
+    assert (root / "b.md").read_text(encoding="utf-8") == edited
 
 
 def test_failed_check_keeps_the_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,7 +120,7 @@ def test_failed_check_keeps_the_marker(tmp_path: Path, monkeypatch: pytest.Monke
 
 def test_a_marker_that_names_no_snapshot_is_refused(tmp_path: Path) -> None:
     root = hand_store(tmp_path)
-    (root / MIGRATING).write_text("not a snapshot id\n")
+    (root / MIGRATING).write_text("not a snapshot id\n", encoding="utf-8")
     before = snapshot(root)
     assert run_migrate(str(root)).code == 1
     res = run_migrate(str(root), apply=True)
@@ -130,7 +130,7 @@ def test_a_marker_that_names_no_snapshot_is_refused(tmp_path: Path) -> None:
 
 def test_lock_timeout_exits_5_and_writes_nothing(tmp_path: Path) -> None:
     root = hand_store(tmp_path)
-    (root / ".memory-index.json").write_text(json.dumps({"lock_timeout_s": 1}))
+    (root / ".memory-index.json").write_text(json.dumps({"lock_timeout_s": 1}), encoding="utf-8")
     before = snapshot(root)
     with StoreDir(str(root)) as other, other.lock(1):
         assert run_migrate(str(root), apply=True).code == 5
@@ -156,13 +156,13 @@ def test_snapshot_ids_never_collide(tmp_path: Path) -> None:
 
 def test_manifest_records_every_copy_and_its_intended_hash(tmp_path: Path) -> None:
     root = hand_store(tmp_path)
-    (root / ".index-pending.json").write_text('{"version": 1, "entries": []}')
+    (root / ".index-pending.json").write_text('{"version": 1, "entries": []}', encoding="utf-8")
     res = run_migrate(str(root), apply=True)
     assert res.code == 0, res.messages
     snap = root / res.stats["snapshot"]
-    manifest = json.loads((snap / "manifest.json").read_text())
+    manifest = json.loads((snap / "manifest.json").read_text(encoding="utf-8"))
     assert sorted(manifest["files"]) == [".index-pending.json", L0, "a.md", "b.md", "c.md", NOTES]
     assert manifest["files"]["c.md"]["after"] is None and manifest["files"]["a.md"]["after"] is not None
     assert manifest["files"][NOTES]["before"] is None and not (snap / NOTES).exists()
-    assert (snap / L0).read_text() == INDEX
+    assert (snap / L0).read_text(encoding="utf-8") == INDEX
     assert os.name != "posix" or snap.stat().st_mode & 0o777 == 0o700

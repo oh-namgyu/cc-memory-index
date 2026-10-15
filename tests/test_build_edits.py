@@ -34,14 +34,14 @@ def test_force_backs_up_l0_and_keeps_the_newest_five(tmp_path: Path) -> None:
     root = built_store(tmp_path)
     old = [f".MEMORY.md.bak-2020010{n}T000000Z" for n in range(1, 7)]
     for name in old:
-        (root / name).write_text("old")
-    (root / L0).write_text("# Memory Index\n- precious hand-written line\n")
+        (root / name).write_text("old", encoding="utf-8")
+    (root / L0).write_text("# Memory Index\n- precious hand-written line\n", encoding="utf-8")
     res = run_build(str(root), True)
     assert res.code == 0 and res.stats["written"] == [L0]
     (new,) = res.stats["backups"]
     assert _backups(root) == old[2:] + [new] and _backups(root, L1) == []
-    assert (root / new).read_text() == "# Memory Index\n- precious hand-written line\n"
-    assert "precious" not in (root / L0).read_text() and run_check(str(root)).code == 0
+    assert (root / new).read_text(encoding="utf-8") == "# Memory Index\n- precious hand-written line\n"
+    assert "precious" not in (root / L0).read_text(encoding="utf-8") and run_check(str(root)).code == 0
 
 
 def test_force_backs_up_both_generated_files(tmp_path: Path) -> None:
@@ -68,7 +68,7 @@ def test_backup_names_never_collide(tmp_path: Path) -> None:
                          ".MEMORY.md.bak-19700101T000000Z-2"]
     assert names[11] == ".MEMORY.md.bak-19700101T000000Z-11"
     assert _backups(root) == sorted(names[7:]) and other == ".index-l1.md.bak-19700101T000000Z"
-    assert [(root / n).read_text() for n in names[7:]] == [f"v{n}" for n in range(7, 12)]
+    assert [(root / n).read_text(encoding="utf-8") for n in names[7:]] == [f"v{n}" for n in range(7, 12)]
 
 
 def test_backup_survives_a_clock_that_stepped_back(tmp_path: Path) -> None:
@@ -81,10 +81,10 @@ def test_backup_survives_a_clock_that_stepped_back(tmp_path: Path) -> None:
 
 def test_tiered_store_without_record_treats_l0_as_edited(tmp_path: Path) -> None:
     root = sample_store(tmp_path)
-    (root / L0).write_text("- something by hand\n")
+    (root / L0).write_text("- something by hand\n", encoding="utf-8")
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["manual_added"] == ["something by hand"]
-    (root / L0).write_text("Some text by hand\n")
+    (root / L0).write_text("Some text by hand\n", encoding="utf-8")
     res = run_build(str(root), False)
     assert res.code == 3 and "preamble edited" in res.messages[0]
     assert run_build(str(root), True).code == 0
@@ -120,17 +120,17 @@ def test_interrupted_build_converges(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 def test_malformed_record(tmp_path: Path) -> None:
     root = built_store(tmp_path)
-    (root / MARK).write_text("{oops")
+    (root / MARK).write_text("{oops", encoding="utf-8")
     res = run_build(str(root), False)
     assert res.code == 0 and "malformed" in res.messages[0] and res.stats["written"] == [MARK]
-    (root / MARK).write_text("{oops")
-    (root / L0).write_text("hand-written text\n")
+    (root / MARK).write_text("{oops", encoding="utf-8")
+    (root / L0).write_text("hand-written text\n", encoding="utf-8")
     assert run_build(str(root), False).code == 3
 
 
 def test_record_without_l1_name_means_the_default(tmp_path: Path) -> None:
     root = built_store(tmp_path)
-    (root / MARK).write_text((root / MARK).read_text().replace(',\n  "l1_name": "index-l1.md"', ""))
+    (root / MARK).write_text((root / MARK).read_text(encoding="utf-8").replace(',\n  "l1_name": "index-l1.md"', ""), encoding="utf-8")
     append(root, L1, "- an L1 line added by hand\n")
     res = run_build(str(root), False)
     assert res.code == 0 and res.stats["manual_added"] == ["an L1 line added by hand"]

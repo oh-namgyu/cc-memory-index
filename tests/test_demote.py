@@ -27,7 +27,7 @@ def test_only_the_tier_line_changes(tmp_path: Path) -> None:
     assert res.messages[0] == "build.md: tier set to indexed"
     after = (root / "build.md").read_bytes()
     assert _changed_lines(before, after) == [(b'  tier: "resident"', b'  tier: "indexed"')]
-    assert "build.md" not in (root / L0).read_text() and "[Build](build.md)" in (root / L1).read_text()
+    assert "build.md" not in (root / L0).read_text(encoding="utf-8") and "[Build](build.md)" in (root / L1).read_text(encoding="utf-8")
     assert run_check(str(root)).code == 0
 
 
@@ -90,7 +90,7 @@ def test_non_source_entries_exit_2(tmp_path: Path) -> None:
 
 def test_unparseable_frontmatter_exits_7(tmp_path: Path) -> None:
     root = built_store(tmp_path)
-    (root / "open.md").write_text("---\nname: open\nno closing line\n")
+    (root / "open.md").write_text("---\nname: open\nno closing line\n", encoding="utf-8")
     before = snapshot(root)
     res = run_demote(str(root), "open.md")
     assert res.code == 7 and "set its tier by hand" in res.messages[0]
@@ -103,19 +103,19 @@ def test_concurrent_edit_exits_4_and_keeps_the_edit(tmp_path: Path, monkeypatch:
     edited = memory_text(name="Build", description="edited meanwhile", tier="resident")
 
     def racing(text: str, add: dict[str, str], replace: dict[str, str]) -> str:
-        (root / "build.md").write_text(edited)
+        (root / "build.md").write_text(edited, encoding="utf-8")
         return real(text, add, replace)
 
     monkeypatch.setattr(frontmatter, "patch", racing)
     l0 = (root / L0).read_bytes()
     res = run_demote(str(root), "build.md")
     assert res.code == 4 and "edited concurrently" in res.messages[0]
-    assert (root / "build.md").read_text() == edited and (root / L0).read_bytes() == l0
+    assert (root / "build.md").read_text(encoding="utf-8") == edited and (root / L0).read_bytes() == l0
 
 
 def test_migration_marker_refuses(tmp_path: Path) -> None:
     root = built_store(tmp_path)
-    (root / ".index-migrating").write_text("")
+    (root / ".index-migrating").write_text("", encoding="utf-8")
     res = run_demote(str(root), "build.md")
     assert res.code == 2 and "migrate --apply" in res.messages[0]
 
@@ -125,4 +125,4 @@ def test_demote_files_stops_at_the_first_failure(tmp_path: Path) -> None:
     write_memory(root, "x.md", name="x", tier="resident")
     res = demote_files(str(root), ["x.md", "missing.md", "tea.md"])
     assert res.code == 2 and res.stats["demoted"] == ["x.md"]
-    assert parse((root / "tea.md").read_text()).get("tier") == "resident"
+    assert parse((root / "tea.md").read_text(encoding="utf-8")).get("tier") == "resident"

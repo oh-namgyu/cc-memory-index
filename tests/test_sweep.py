@@ -23,7 +23,7 @@ OLD = 11 * 60
 
 def _temp(root: Path, name: str = f".MEMORY.md.tmp-{HEX}", age_s: int = OLD, data: str = "half a write") -> Path:
     path = root / name
-    path.write_text(data)
+    path.write_text(data, encoding="utf-8")
     then = time.time() - age_s
     os.utime(path, (then, then))
     return path
@@ -55,7 +55,7 @@ def test_links_directories_and_hard_links_are_never_touched(
     os.link(twin, tmp_path / "twin")
     with StoreDir(str(root)) as sd:
         assert sd.sweep_temp() == 0
-    assert link.is_symlink() and target.read_text() == "half a write" and folder.is_dir() and twin.is_file()
+    assert link.is_symlink() and target.read_text(encoding="utf-8") == "half a write" and folder.is_dir() and twin.is_file()
 
 
 @pytest.mark.parametrize("command", [
@@ -83,7 +83,7 @@ def test_migrate_sweeps_its_snapshot_and_restore_the_store(tmp_path: Path) -> No
     write_memory(root, "a.md", name="a")
     write_index(root, "## S\n- [A](a.md) — x\n")
     (root / f"{SNAPSHOT_PREFIX}20260101T000000Z").mkdir()
-    (root / ".index-migrating").write_text("20260101T000000Z\n")
+    (root / ".index-migrating").write_text("20260101T000000Z\n", encoding="utf-8")
     _temp(root / f"{SNAPSHOT_PREFIX}20260101T000000Z", f".manifest.json.tmp-{HEX}")
     res = run_migrate(str(root), apply=True)
     assert res.code == 0 and res.stats["temp_removed"] == 1, res.messages
@@ -91,4 +91,4 @@ def test_migrate_sweeps_its_snapshot_and_restore_the_store(tmp_path: Path) -> No
     _temp(root)
     res = run_migrate(str(root), restore="20260101T000000Z")
     assert res.code == 0 and res.stats["temp_removed"] == 1
-    assert (root / "MEMORY.md").read_text() == "## S\n- [A](a.md) — x\n"
+    assert (root / "MEMORY.md").read_text(encoding="utf-8") == "## S\n- [A](a.md) — x\n"

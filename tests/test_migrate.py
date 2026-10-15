@@ -28,7 +28,7 @@ def _store(tmp_path: Path, index: str, *names: str, eol: str = "\n") -> Path:
 
 
 def _meta(root: Path, name: str) -> dict[str, str]:
-    return parse((root / name).read_text()).metadata
+    return parse((root / name).read_text(encoding="utf-8")).metadata
 
 
 def _pieces(text: str) -> set[str]:
@@ -47,8 +47,8 @@ def test_frontmatter_block_and_intro_become_the_preamble(tmp_path: Path) -> None
     root = _store(tmp_path, INTRO + "\n## Rules\n- [Tea](tea.md) — likes tea\n", "tea.md")
     res = run_migrate(str(root), apply=True)
     assert res.code == 0, res.messages
-    assert json.loads((root / MANUAL).read_text())["preamble"] == INTRO.rstrip("\n")
-    assert (root / L0).read_text().startswith(INTRO + "\n" + link_line(L1) + "\n")
+    assert json.loads((root / MANUAL).read_text(encoding="utf-8"))["preamble"] == INTRO.rstrip("\n")
+    assert (root / L0).read_text(encoding="utf-8").startswith(INTRO + "\n" + link_line(L1) + "\n")
     assert _meta(root, "tea.md")["idx"] == "[Tea](tea.md) — likes tea"
 
 
@@ -69,12 +69,12 @@ def test_every_original_segment_stays_in_l0(tmp_path: Path) -> None:
     root = _store(tmp_path, SECTIONED, "tea.md", "build.md", "lint.md", "old.md", "never-listed.md")
     res = run_migrate(str(root), apply=True)
     assert res.code == 0, res.messages
-    l0 = (root / L0).read_text()
+    l0 = (root / L0).read_text(encoding="utf-8")
     assert all(normalize_ws(seg) in _pieces(l0) for seg in _segments(SECTIONED))
-    assert "never-listed.md" not in l0 and "[never-listed](never-listed.md)" in (root / L1).read_text()
+    assert "never-listed.md" not in l0 and "[never-listed](never-listed.md)" in (root / L1).read_text(encoding="utf-8")
     assert res.stats["resident"] == 4 and res.stats["manual"] == 2 and res.stats["untouched"] == 1
     assert (res.stats["notes"], res.stats["notes_file"]) == (1, "index-notes.md")
-    notes = (root / "index-notes.md").read_text()
+    notes = (root / "index-notes.md").read_text(encoding="utf-8")
     assert notes.endswith("\n## Rules\n\n### Tools\nSome paragraph that is not a list line.\n")
     assert _meta(root, "lint.md") == {"tier": "resident", "idx": "[Lint](lint.md) — ruff, then mypy",
                                       "idx_section": "Rules", "idx_sub": "Tools", "idx_order": "40"}
@@ -87,7 +87,7 @@ def test_separator_inside_brackets_is_not_split(tmp_path: Path) -> None:
     root = _store(tmp_path, index, "a.md", "c.md")
     assert run_migrate(str(root), apply=True).code == 0
     assert _meta(root, "a.md")["idx"] == "[A · B](a.md) — x (y · z)"
-    assert {"[A · B](a.md) — x (y · z)", "[C](c.md) — w"} <= _pieces((root / L0).read_text())
+    assert {"[A · B](a.md) — x (y · z)", "[C](c.md) — w"} <= _pieces((root / L0).read_text(encoding="utf-8"))
 
 
 def test_second_segment_for_the_same_file_becomes_a_manual_line(tmp_path: Path) -> None:
@@ -96,9 +96,9 @@ def test_second_segment_for_the_same_file_becomes_a_manual_line(tmp_path: Path) 
     res = run_migrate(str(root), apply=True)
     assert res.code == 0, res.messages
     assert _meta(root, "a.md")["idx"] == "[A](a.md) — first"
-    lines = json.loads((root / MANUAL).read_text())["lines"]
+    lines = json.loads((root / MANUAL).read_text(encoding="utf-8"))["lines"]
     assert [line["seg"] for line in lines] == ["[A again](a.md) — second", "[A](a.md) — third"]
-    assert set(_segments(index)) <= _pieces((root / L0).read_text())
+    assert set(_segments(index)) <= _pieces((root / L0).read_text(encoding="utf-8"))
     assert sum("an earlier line already links a.md" in m for m in res.messages) == 2
 
 
@@ -110,14 +110,14 @@ def test_section_names_with_slashes_migrate_idempotently(tmp_path: Path) -> None
     res = run_migrate(str(root), apply=True)
     assert res.code == 0 and "already uses" in res.messages[0] and tree(root) == after
     assert _meta(root, "b.md")["idx_section"] == "Tools / CLI" and _meta(root, "b.md")["idx_sub"] == "a/b/c"
-    assert "## Tools / CLI\n" in (root / L0).read_text() and "### a/b/c\n" in (root / L0).read_text()
+    assert "## Tools / CLI\n" in (root / L0).read_text(encoding="utf-8") and "### a/b/c\n" in (root / L0).read_text(encoding="utf-8")
 
 
 def test_all_resident_store_still_writes_l1(tmp_path: Path) -> None:
     root = _store(tmp_path, "## S\n- [A](a.md) — x\n- [B](b.md) — y\n", "a.md", "b.md")
     assert run_migrate(str(root), apply=True).code == 0
-    assert link_line(L1) in (root / L0).read_text() and (root / L1).is_file()
-    assert "- [" not in (root / L1).read_text()
+    assert link_line(L1) in (root / L0).read_text(encoding="utf-8") and (root / L1).is_file()
+    assert "- [" not in (root / L1).read_text(encoding="utf-8")
 
 
 def test_crlf_or_bom_index_migrates_like_lf(tmp_path: Path) -> None:
@@ -154,7 +154,7 @@ def test_over_budget_index_fits_and_overflows_to_l1(tmp_path: Path) -> None:
     write_index(root, index)
     res = run_migrate(str(root), apply=True)
     assert res.code == 0 and "suggest" in " ".join(res.messages)
-    l0, l1 = (root / L0).read_bytes(), (root / L1).read_text()
+    l0, l1 = (root / L0).read_bytes(), (root / L1).read_text(encoding="utf-8")
     assert len(l0) <= 20480 and l0.count(b"\n") <= 160 and "## Overflow" in l1
     assert set(map(normalize_ws, _segments(index))) <= _pieces(l0.decode()) | _pieces(l1)
     assert all(_meta(root, f"m{n:03d}.md")["tier"] == "resident" for n in range(300))
@@ -181,9 +181,9 @@ def test_flat_list_without_headings(tmp_path: Path) -> None:
     index = "# Memory Index\n\n- [A](a.md) — x\n- [B](b.md) — y\n"
     root = _store(tmp_path, index, "a.md", "b.md")
     assert run_migrate(str(root), apply=True).code == 0
-    assert json.loads((root / MANUAL).read_text())["preamble"] == "# Memory Index"
+    assert json.loads((root / MANUAL).read_text(encoding="utf-8"))["preamble"] == "# Memory Index"
     assert _meta(root, "a.md")["idx_section"] == "Other"
-    assert "## Other\n- [A](a.md) — x\n- [B](b.md) — y\n" in (root / L0).read_text()
+    assert "## Other\n- [A](a.md) — x\n- [B](b.md) — y\n" in (root / L0).read_text(encoding="utf-8")
 
 
 def test_already_migrated_store_is_left_unchanged(tmp_path: Path) -> None:
@@ -202,13 +202,13 @@ def test_tiered_store_never_built_is_built_by_apply_only(tmp_path: Path) -> None
     res = run_migrate(str(root))
     assert res.code == 0 and "never built" in res.messages[0] and snapshot(root) == before
     res = run_migrate(str(root), apply=True)
-    assert res.code == 0 and "[A](a.md) — x" in (root / L0).read_text()
+    assert res.code == 0 and "[A](a.md) — x" in (root / L0).read_text(encoding="utf-8")
     assert not any(p.name.startswith(".index-backup-") for p in root.iterdir())
 
 
 def test_unusable_links_become_manual_lines(tmp_path: Path, symlink: Callable[[Path, Path], None]) -> None:
     outside = tmp_path / "outside.md"
-    outside.write_text(memory_text(name="outside"))
+    outside.write_text(memory_text(name="outside"), encoding="utf-8")
     index = ("## S\n- [OK](ok.md) — fine\n- [Gone](gone.md) — missing · [Out](../outside.md) — outside\n"
              "- [L](linked.md) — link\n- [Two](a.md) and [links](b.md)\n- [Web](https://example.com/x.md)\n")
     root = _store(tmp_path, "", "ok.md", "a.md", "b.md")
@@ -218,10 +218,10 @@ def test_unusable_links_become_manual_lines(tmp_path: Path, symlink: Callable[[P
     res = run_migrate(str(root), apply=True)
     assert res.code == 7 and "skipped linked.md" in res.messages[-1], res.messages
     assert (outside.read_bytes(), os.stat(outside).st_mtime_ns) == before and (root / "linked.md").is_symlink()
-    assert [line["seg"] for line in json.loads((root / MANUAL).read_text())["lines"]] == _segments(index)[1:]
+    assert [line["seg"] for line in json.loads((root / MANUAL).read_text(encoding="utf-8"))["lines"]] == _segments(index)[1:]
     notes = " ".join(res.messages)
     assert "'gone.md' is not a readable" in notes and "'../outside.md' is not a readable" in notes
-    assert "tier" not in _meta(root, "a.md") and set(_segments(index)) <= _pieces((root / L0).read_text())
+    assert "tier" not in _meta(root, "a.md") and set(_segments(index)) <= _pieces((root / L0).read_text(encoding="utf-8"))
     assert not any("outside" in rel for rel in tree(root) if rel.startswith(".index-backup-"))
 
 
@@ -230,7 +230,7 @@ def test_index_without_memory_links(tmp_path: Path) -> None:
     root = _store(tmp_path, index, "a.md")
     res = run_migrate(str(root), apply=True)
     assert res.code == 0, res.messages
-    assert "## Rules\n- Ask before deleting anything\n- Prefer small commits\n" in (root / L0).read_text()
+    assert "## Rules\n- Ask before deleting anything\n- Prefer small commits\n" in (root / L0).read_text(encoding="utf-8")
     assert run_migrate(str(root), apply=True).code == 0
 
 
@@ -240,7 +240,7 @@ def test_sources_that_cannot_take_the_line(tmp_path: Path) -> None:
     root = make_store(tmp_path)
     write_memory(root, "diff.md", idx="the file's own line")
     write_memory(root, "equal.md", idx="[E](equal.md) —  same text", idx_order=7)
-    (root / "unclosed.md").write_text("---\nname: never closed\n")
+    (root / "unclosed.md").write_text("---\nname: never closed\n", encoding="utf-8")
     write_memory(root, "hard.md", name="hard")
     os.link(root / "hard.md", tmp_path / "hard-twin.md")
     write_index(root, index)
@@ -249,7 +249,7 @@ def test_sources_that_cannot_take_the_line(tmp_path: Path) -> None:
     assert _meta(root, "diff.md") == {"idx": "the file's own line"}
     assert _meta(root, "equal.md") == {"idx": "[E](equal.md) —  same text", "idx_order": "7", "tier": "resident",
                                        "idx_section": "S", "idx_sub": ""}
-    assert (root / "unclosed.md").read_text() == "---\nname: never closed\n" and "tier" not in _meta(root, "hard.md")
+    assert (root / "unclosed.md").read_text(encoding="utf-8") == "---\nname: never closed\n" and "tier" not in _meta(root, "hard.md")
     notes = " ".join(res.messages)
     assert "different idx" in notes and "cannot be patched" in notes and "hard link" in notes
 
@@ -267,5 +267,5 @@ def test_index_that_is_not_utf8_is_refused(tmp_path: Path) -> None:
 @pytest.mark.parametrize("name, content", [(".memory-index.json", '{"bogus": 1}'), (MANUAL, "{")])
 def test_configuration_errors_exit_2(tmp_path: Path, name: str, content: str) -> None:
     root = _store(tmp_path, "## S\n- [A](a.md) — x\n", "a.md")
-    (root / name).write_text(content)
+    (root / name).write_text(content, encoding="utf-8")
     assert run_migrate(str(root), apply=True).code == 2 and "tier" not in _meta(root, "a.md")

@@ -39,7 +39,7 @@ def test_options_before_the_command(tmp_path: Path, capsys: pytest.CaptureFixtur
 
 def test_json_reports_refusals(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root = built_store(tmp_path)
-    with (root / "MEMORY.md").open("a") as f:
+    with (root / "MEMORY.md").open("a", encoding="utf-8") as f:
         f.write("- [x](missing.md) — points at no memory file\n")
     code, obj, err = _json(capsys, ["build", "--json", "--dir", str(root)])
     assert code == obj["code"] == 3 and err == ""
@@ -49,7 +49,7 @@ def test_json_reports_refusals(tmp_path: Path, capsys: pytest.CaptureFixture[str
 
 def test_human_summary_on_stdout_warnings_on_stderr(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root = sample_store(tmp_path)
-    (root / "broken.md").write_text("---\nname: x\n")
+    (root / "broken.md").write_text("---\nname: x\n", encoding="utf-8")
     assert cli.main(["build", "--dir", str(root)]) == 7
     out, err = capsys.readouterr()
     assert "broken.md" in err and "broken.md" not in out
@@ -69,7 +69,7 @@ def test_check_out_of_sync(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
 
 def test_force_flag(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root = built_store(tmp_path)
-    (root / "MEMORY.md").write_text("- by hand\n")
+    (root / "MEMORY.md").write_text("- by hand\n", encoding="utf-8")
     assert cli.main(["build", "--force", "--dir", str(root)]) == 0
     assert "--force" in capsys.readouterr().err
 

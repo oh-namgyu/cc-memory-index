@@ -180,7 +180,7 @@ def test_the_name_avoids_existing_files_and_names_the_index_links(tmp_path: Path
     assert (root / NOTES).read_bytes() == mine and not (root / "index-notes-2.md").exists()
     text = (root / "index-notes-3.md").read_text(encoding="utf-8")
     assert parse(text).get("name") == "index-notes-3" and "(index-notes-3.md)" in (parse(text).get("idx") or "")
-    manifest = json.loads((root / (SNAPSHOT_PREFIX + _ident(root)) / "manifest.json").read_text())
+    manifest = json.loads((root / (SNAPSHOT_PREFIX + _ident(root)) / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["files"]["index-notes-3.md"]["before"] is None and NOTES in manifest["files"]
 
 

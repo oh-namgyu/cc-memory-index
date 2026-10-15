@@ -19,7 +19,7 @@ def _store(tmp_path: Path, marked: bool = True) -> Path:
     store = tmp_path / "memory"
     store.mkdir(parents=True)
     if marked:
-        (store / ".index-render.json").write_text("{}")
+        (store / ".index-render.json").write_text("{}", encoding="utf-8")
     return store
 
 

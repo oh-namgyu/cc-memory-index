@@ -81,7 +81,7 @@ def test_config_errors(tmp_path: Path, config: Union[str, dict]) -> None:
 
 def test_config_link_is_refused(tmp_path: Path, symlink: Symlink) -> None:
     outside = tmp_path / "outside.json"
-    outside.write_text("{}")
+    outside.write_text("{}", encoding="utf-8")
     with _store(tmp_path) as sd:
         symlink(Path(sd.path) / ".memory-index.json", outside)
         with pytest.raises(ConfigError):
@@ -121,7 +121,7 @@ def test_scan_reads_sources_and_reports_skips(tmp_path: Path, symlink: Symlink) 
     assert sorted(skipped) == [".hidden.md", "bad name.md", "big.md", "bin.md", "dir.md", "link.md"]
     assert "link" in skipped["link.md"] and "KiB" in skipped["big.md"] and "UTF-8" in skipped["bin.md"]
     assert all(reason for reason in skipped.values())
-    assert (tmp_path / "outside.md").read_text() == "secret"
+    assert (tmp_path / "outside.md").read_text(encoding="utf-8") == "secret"
 
 
 def test_scan_excludes_generated_names_case_insensitively(tmp_path: Path) -> None:

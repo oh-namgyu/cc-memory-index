@@ -135,9 +135,9 @@ def test_apply_demotes_the_proposal_and_builds_within_budget(tmp_path: Path) -> 
     proposed = _files(run_suggest(str(root)))
     res = run_suggest(str(root), apply=True)
     assert res.code == 0 and res.stats["demoted"] == proposed == _files(res)
-    assert res.stats["build"]["overflow"] == 0 and "Warning" not in (root / "MEMORY.md").read_text()
+    assert res.stats["build"]["overflow"] == 0 and "Warning" not in (root / "MEMORY.md").read_text(encoding="utf-8")
     for file in NAMES:
-        tier = parse((root / file).read_text()).get("tier")
+        tier = parse((root / file).read_text(encoding="utf-8")).get("tier")
         assert tier == ("indexed" if file in proposed else "resident")
     assert run_check(str(root)).code == 0
     assert run_suggest(str(root)).stats["proposal"] == []
@@ -162,6 +162,6 @@ def test_transcript_count_is_validated(tmp_path: Path, n: int) -> None:
 
 def test_interrupted_migration_refuses(tmp_path: Path) -> None:
     root = fill_store(make_store(tmp_path, TIGHT))
-    (root / ".index-migrating").write_text("")
+    (root / ".index-migrating").write_text("", encoding="utf-8")
     assert run_suggest(str(root)).code == 1
     assert run_suggest(str(root), apply=True).code == 2

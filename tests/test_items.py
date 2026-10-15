@@ -193,7 +193,7 @@ def test_data_file_size_cap_and_links(tmp_path: Path, symlink: Any) -> None:
         with pytest.raises(DataFileError, match="cannot read"):
             load_pending(sd)
         outside = tmp_path / "outside.json"
-        outside.write_text('{"version": 1, "preamble": null, "lines": []}')
+        outside.write_text('{"version": 1, "preamble": null, "lines": []}', encoding="utf-8")
         symlink(root / MANUAL_NAME, outside)
         with pytest.raises(DataFileError, match="cannot read"):
             load_manual(sd)

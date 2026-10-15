@@ -20,7 +20,7 @@ L0, L1, MARK = "MEMORY.md", "index-l1.md", ".index-render.json"
 def clean_store(tmp_path: Path) -> Path:
     root = make_store(tmp_path)
     write_memory(root, "build.md", name="build", description="make test", type="reference", tier="resident")
-    (root / "tea.md").write_text(memory_text("see [[build]] and [[Tea time]]\n", name="Tea time", type="user"))
+    (root / "tea.md").write_text(memory_text("see [[build]] and [[Tea time]]\n", name="Tea time", type="user"), encoding="utf-8")
     return root
 
 
@@ -34,7 +34,7 @@ def _lint(root: Path) -> tuple[int, list[str], list[str]]:
 
 
 def _pending(root: Path) -> list[str]:
-    return [e["file"] for e in json.loads((root / PENDING_NAME).read_text())["entries"]]
+    return [e["file"] for e in json.loads((root / PENDING_NAME).read_text(encoding="utf-8"))["entries"]]
 
 
 def _built(root: Path) -> Path:
@@ -54,7 +54,7 @@ def test_clean_store_has_no_messages_and_lint_writes_nothing(tmp_path: Path) -> 
 
 def test_unparseable_frontmatter_is_an_error(tmp_path: Path) -> None:
     root = clean_store(tmp_path)
-    (root / "open.md").write_text("---\nname: open\nno closing line\n")
+    (root / "open.md").write_text("---\nname: open\nno closing line\n", encoding="utf-8")
     code, errors, _ = _lint(_built(root))
     assert code == 1 and errors[0].startswith("open.md: frontmatter cannot be parsed")
 
@@ -126,7 +126,7 @@ def test_wiki_links_exact_variant_and_missing(tmp_path: Path) -> None:
     root = clean_store(tmp_path)
     write_memory(root, "build-cmds.md", name="build-cmds")
     body = "[[build-cmds]] [[build-cmds.md|alias]] [[Build_Cmds]] [[nowhere#part]] [[nowhere]]\n"
-    (root / "links.md").write_text(memory_text(body, name="links", idx="links [[ignored-in-frontmatter]]"))
+    (root / "links.md").write_text(memory_text(body, name="links", idx="links [[ignored-in-frontmatter]]"), encoding="utf-8")
     code, errors, warnings = _lint(_built(root))
     assert (code, errors) == (1, ["links.md: wiki link 'nowhere' does not resolve to any memory file"])
     assert "links.md: wiki link 'Build_Cmds' matches build-cmds.md only when case and '-'/'_' are ignored" in warnings
@@ -135,9 +135,9 @@ def test_wiki_links_exact_variant_and_missing(tmp_path: Path) -> None:
 def test_warnings_for_names_oversized_idx_bad_names_and_no_frontmatter(tmp_path: Path) -> None:
     root = clean_store(tmp_path)
     write_memory(root, "long.md", name="long", tier="resident", idx="[long](long.md) — " + "y" * 1100)
-    (root / "plain.md").write_text("just text, no frontmatter\n")
-    (root / "_bad.md").write_text("x\n")
-    (root / "a..b.md").write_text("x\n")
+    (root / "plain.md").write_text("just text, no frontmatter\n", encoding="utf-8")
+    (root / "_bad.md").write_text("x\n", encoding="utf-8")
+    (root / "a..b.md").write_text("x\n", encoding="utf-8")
     code, errors, warnings = _lint(_built(root))
     assert (code, errors) == (0, [])
     assert sorted(w.split(":")[0].split(" ")[0] for w in warnings) == ["'_bad.md'", "'a..b.md'", "long.md",
@@ -161,9 +161,9 @@ def test_stale_earlier_l1_file_is_reported_as_build_reports_it(tmp_path: Path) -
 
 def test_record_naming_the_current_l1_is_fine(tmp_path: Path) -> None:
     root = _built(clean_store(tmp_path))
-    record = json.loads((root / MARK).read_text())
+    record = json.loads((root / MARK).read_text(encoding="utf-8"))
     record["l1_name"] = L1
-    (root / MARK).write_text(json.dumps(record))
+    (root / MARK).write_text(json.dumps(record), encoding="utf-8")
     assert not any("stale" in w for w in _lint(root)[2])
 
 
@@ -173,7 +173,7 @@ def test_record_naming_the_current_l1_is_fine(tmp_path: Path) -> None:
 ])
 def test_pending_line_that_cannot_be_folded_is_an_error(tmp_path: Path, frontmatter: str, why: str) -> None:
     root = _built(clean_store(tmp_path))
-    (root / "odd.md").write_text("---\nname: odd\n" + frontmatter + "---\nbody\n")
+    (root / "odd.md").write_text("---\nname: odd\n" + frontmatter + "---\nbody\n", encoding="utf-8")
     append(root, L0, "- [odd](odd.md) — rescued but never folded\n")
     assert run_build(str(root), False).code == 0 and _pending(root) == ["odd.md"]
     code, errors, _ = _lint(root)
@@ -207,13 +207,13 @@ def test_pending_line_left_by_an_interrupted_build_is_an_error_until_built(tmp_p
 
 def test_interrupted_migration_and_unmigrated_store_are_errors(tmp_path: Path) -> None:
     root = _built(clean_store(tmp_path))
-    (root / ".index-migrating").write_text("")
+    (root / ".index-migrating").write_text("", encoding="utf-8")
     code, errors, _ = _lint(root)
     assert code == 1 and "migrate --apply" in errors[0] and len(errors) == 1
     (tmp_path / "hand").mkdir()
     hand = make_store(tmp_path / "hand")
     write_memory(hand, "a.md", name="a")
-    (hand / L0).write_text("- [a](a.md) — written by hand\n")
+    (hand / L0).write_text("- [a](a.md) — written by hand\n", encoding="utf-8")
     code, errors, _ = _lint(hand)
     assert code == 1 and errors == [f"{L0} was written by hand: run `cc-memory-index migrate` first"]
 

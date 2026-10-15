@@ -106,7 +106,7 @@ def test_discover_store_not_found(tmp_path: Path) -> None:
     env = {"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")}
     with pytest.raises(StoreNotFound, match="--dir"):
         discover(None, str(tmp_path), env)
-    (tmp_path / "file").write_text("x")
+    (tmp_path / "file").write_text("x", encoding="utf-8")
     with pytest.raises(StoreNotFound):
         discover(str(tmp_path / "file"), str(tmp_path), env)
     with pytest.raises(StoreNotFound, match="CC_MEMORY_INDEX_DIR"):
@@ -115,7 +115,7 @@ def test_discover_store_not_found(tmp_path: Path) -> None:
 
 def _marked(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
-    (path / ".index-render.json").write_text("{}")
+    (path / ".index-render.json").write_text("{}", encoding="utf-8")
     return path
 
 
@@ -148,7 +148,7 @@ def test_store_root_for_edit_rejects_a_linked_or_non_file_mark(tmp_path: Path, s
     linked = tmp_path / "linked"
     linked.mkdir()
     target = tmp_path / "target.json"
-    target.write_text("{}")
+    target.write_text("{}", encoding="utf-8")
     symlink(linked / ".index-render.json", target)
     assert store_root_for_edit(str(linked / "a.md")) is None
     dir_mark = tmp_path / "dirmark"
@@ -176,15 +176,15 @@ def test_repo_root_plain_subdir_worktree_and_submodule(tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     wt.mkdir()
     (main / ".git" / "worktrees" / "wt").mkdir(parents=True)
-    (wt / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'wt'}\n")
+    (wt / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'wt'}\n", encoding="utf-8")
     assert repo_root(str(wt)) == str(main)
     sub = main / "vendor" / "lib"
     sub.mkdir(parents=True)
-    (sub / ".git").write_text("gitdir: ../../.git/modules/lib\n")
+    (sub / ".git").write_text("gitdir: ../../.git/modules/lib\n", encoding="utf-8")
     assert repo_root(str(sub)) == str(sub)
     odd = tmp_path / "odd"
     odd.mkdir()
-    (odd / ".git").write_text("not a gitdir line")
+    (odd / ".git").write_text("not a gitdir line", encoding="utf-8")
     assert repo_root(str(odd)) == str(odd)
     plain = tmp_path / "plain" / "x"
     plain.mkdir(parents=True)
